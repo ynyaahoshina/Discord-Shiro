@@ -51,7 +51,7 @@ const emojiCluster = /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20E3]/u;
 const customEmote = /<a?:[A-Za-z0-9_]+:\d+>/g;
 const textFace = /(?:^|\s)(?:[:;=8][-^']?[)(DPpOo/\\]|xD|XD|T_T|;_;|\^_\^|>_<|<3)(?=\s|$|[.!?])/g;
 export function withoutEmotes(value) {
-  const plain = String(value || '').replace(customEmote, '').replace(textFace, ' ');
+  const plain = String(value || '').replace(customEmote, '').replace(/:[A-Za-z0-9_]{2,}:/g, '').replace(textFace, ' ');
   return [...new Intl.Segmenter('en',{granularity:'grapheme'}).segment(plain)]
     .map(x=>x.segment).filter(x=>!emojiCluster.test(x)).join('').replace(/[ \t]{2,}/g,' ').replace(/\s+([,.!?])/g,'$1').trim();
 }
@@ -61,9 +61,50 @@ export function allowEmotes(context) {
   return recent.length===8 && recent.every(row=>withoutEmotes(row.text)===String(row.text||'').trim());
 }
 
+
+export const EMOTE_GUIDE = Object.freeze({
+  T_hoshinya: 'Small affectionate couple reaction; fitting Hoshina/Hinami moments with the verified partner.',
+  Germ_narumi: 'Goofy green Narumi germ; lighthearted Narumi jokes, not real hostility.',
+  HinamiShock: 'Startled Hinami face; unexpected, absurd, or surprising news.',
+  Airrun: 'Running character; playfully rushing, fleeing a joke, or being in a hurry.',
+  Hinami67: 'Hinami 67 meme; matching 67 jokes or silly meme banter.',
+  MaiFlower: 'Mai offering a flower; small congratulatory, friendly, or appreciative gestures.',
+  Mai67: 'Mai 67 meme; matching 67 jokes or silly meme banter.',
+  IzumiEat: 'Izumi eating; food talk or playfully watching something unfold.',
+  HinamiHeart: 'Hinami heart reaction; genuine affectionate moments with the verified partner.',
+  HinamiPee: 'Toilet joke reaction; only when the conversation calls for that specific silly joke.',
+  HikariHoshinaPenggolenbyMax: 'Little penguin-like Hikari; Hikari or family jokes with the verified partner.',
+  HoshinaLaugh: 'Hoshina laughing; something genuinely funny, not every joke.'
+});
+const emoteToken = /<a?:([A-Za-z0-9_]+):\d+>|:([A-Za-z0-9_]{2,}):/g;
+export function availableEmotes(context) {
+  return Object.fromEntries(Object.entries(context.emotes || {}).filter(([name,tag]) =>
+    Object.hasOwn(EMOTE_GUIDE,name) && typeof tag === 'string' &&
+    new RegExp('^<a?:' + name + ':\\d+>$').test(tag) &&
+    (context.isPartner || !['T_hoshinya','HinamiHeart','HikariHoshinaPenggolenbyMax'].includes(name))));
+}
+export function renderApprovedEmotes(value,context) {
+  const allowed = allowEmotes(context) ? availableEmotes(context) : {};
+  let selected = '';
+  const placeholder = '\uE000';
+  const text = String(value || '').replace(/\uE000/g,'').replace(emoteToken,(_,actual,alias)=>{
+    const name=actual||alias;
+    if (!selected && Object.hasOwn(allowed,name)) { selected=allowed[name]; return placeholder; }
+    return '';
+  });
+  return withoutEmotes(text).replace(placeholder,selected).trim();
+}
+export function emotePrompt(context) {
+  const available=availableEmotes(context);
+  if(!allowEmotes(context)||!Object.keys(available).length)
+    return 'For this reply, use plain text without emojis or emoticons. Express tone through your wording.';
+  return 'Plain text is normal. If a reaction genuinely fits, optionally use ONE of these server emotes by typing its exact :name: alias. No generic emojis, other emotes, or emoticons. Never force an emote.\n'
+    +Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]).join('\n');
+}
+
 export function conversation(system,context,{retry=false}={}) {
   const rows=(context.previous||[]).filter(isFresh).slice(retry?-6:-100);
-  const messages=[{role:'system',content:system + (allowEmotes(context) ? '\nUse plain text by default. One emoji or emoticon is permitted only if it adds something meaningful; do not tack one onto the end out of habit.' : '\nFor this reply, use plain text without emojis, custom Discord emotes, or text emoticons. Express tone through your wording.')}];
+  const messages=[{role:'system',content:system + '\n' + emotePrompt(context)}];
   const add=(role,content)=>{
     if(!content.trim())return;
     const last=messages.at(-1);
