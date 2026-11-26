@@ -14,7 +14,7 @@ if (!channels.size || !guilds.size) throw new Error('Configure test channel and 
 const number = (key, fallback, max) => Math.max(1, Math.min(max, Number.parseInt(env[key], 10) || fallback));
 const historyDepth = 100;
 const recentDepth = 100;
-const outputBudget = number('RESPONSE_TOKEN_BUDGET', 1024, 1024);
+const outputBudget = number('RESPONSE_TOKEN_BUDGET', 512, 1024);
 const cooldown = Math.min(number('COOLDOWN_MS', 1000, 300000), 1000);
 const dailyLimit = number('DAILY_REQUEST_LIMIT', 200, 10000);
 const personality = await readFile(new URL('./personality.txt', import.meta.url), 'utf8');
@@ -31,15 +31,18 @@ const record = m => {
   return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(text + attachment) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
-const retiredModels = new Set(['qwen/qwen3.5-397b-a17b','google/gemma-4-31b-it','meta/muse-glimmer-30b']);
-const defaultModel = 'z-ai/glm-5.3-flash';
-const model = !configuredModel || retiredModels.has(configuredModel) ? defaultModel : configuredModel;
-const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 25000, 90000);
-const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 35000, 120000);
-if(retiredModels.has(configuredModel)) console.warn('[CONFIG] Ignoring retired model; using GLM Flash');
-console.log('[CONFIG] revision=glm-stream-v24 selectedModel='+safeModel(model)+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+const defaultModels = ['nvidia/nemotron-3.5-super-vl-120b-a12b','nvidia/nemotron-3.5-bolt-e4b','nvidia/nemotron-3-ultra-550b-a55b'];
+// Only these three approved models participate in the conversational chain.
+const modelChain = defaultModels.includes(configuredModel)
+  ? [configuredModel,...defaultModels.filter(m=>m!==configuredModel)] : defaultModels;
+const model = modelChain[0];
+const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
+const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
+const modelCooldowns = new Map();
+if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
+console.log('[CONFIG] revision=nemotron-chain-v25 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
-const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
+const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
   let result = String(value ?? '');
   for (const [key, secret] of Object.entries(env)) {
@@ -201,15 +204,13 @@ async function generate(context, authorId, channelId, guild) {
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
   const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore});
   const deadline=Date.now()+totalTimeout;
-  const request = async (selected, retry=false) => {
+  const request = async (selected, slotsLeft) => {
     const started = Date.now();
-    const remaining=Math.min(requestTimeout,deadline-started);
+    const remaining=Math.min(requestTimeout,Math.floor((deadline-started)/slotsLeft));
     if(remaining<=0)throw new Error('AI generation deadline exceeded');
-    const messages = conversation(system, context, {retry});
-    const options = selected === 'z-ai/glm-5.3-flash'
-      ? {reasoning_effort:'low',chat_template_kwargs:{reasoning_effort:'low',clear_thinking:true}}
-      : {};
-    console.log('[AI] Request model=' + selected + ' retry=' + retry + ' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
+    const messages = conversation(system, context);
+    const options = {chat_template_kwargs:{enable_thinking:false}};
+    console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     const response = await fetch(endpoint, {
       method:'POST',
       headers:{Authorization:'Bearer '+env.NVIDIA_API_KEY,'Content-Type':'application/json','Accept':'text/event-stream'},
@@ -244,20 +245,24 @@ async function generate(context, authorId, channelId, guild) {
     console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' reasoning_present='+Boolean(choice?.message?.reasoning_content)+' completionTokens='+(data.usage?.completion_tokens??'unknown')+' visibleChars='+cleaned.length+' recycled='+repeat);
     return cleaned&&!repeat&&!wrongAddress?cleaned:'';
   };
-  for(let attempt=0;attempt<2;attempt++){
+  const candidates=modelChain.filter(m=>(modelCooldowns.get(m)||0)<=Date.now());
+  if(!candidates.length){console.warn('[AI] All conversational endpoints cooling down');throw new Error('Empty AI response');}
+  for(let i=0;i<candidates.length;i++){
+    if(deadline-Date.now()<=0)break;
+    const selected=candidates[i];
     try{
-      const answer=await request(model,attempt>0);
-      if(answer)return answer;
+      const answer=await request(selected,candidates.length-i);
+      if(answer){console.log('[AI] Accepted reply model='+selected);return answer;}
+      console.warn('[AI] Unusable reply model='+selected+'; trying next model');
     }catch(error){
-      if(error.name==='TimeoutError'||error.name==='AbortError'){
-        console.warn('[AI] Generation timed out model='+model+'; no automatic timeout retry');
-        throw new Error('AI generation timed out');
-      }
-      console.warn('[AI] Generation request failed model='+model+' type='+safeError(error.name)+' detail='+safeError(error.message));
-      throw error;
+      // Authentication failure affects the shared key, so do not waste further calls.
+      if(error.status===401)throw error;
+      const timedOut=error.name==='TimeoutError'||error.name==='AbortError';
+      if(error.status===410)modelCooldowns.set(selected,Infinity);
+      else if(timedOut||[403,404,408,429,500,502,503,504].includes(error.status)||error.name==='TypeError')modelCooldowns.set(selected,Date.now()+60000);
+      console.warn('[AI] Model failed='+selected+' reason='+safeError(timedOut?'timeout':error.message)+'; trying next model');
     }
-    if(deadline-Date.now()<5000)break;
-    if(attempt===0)console.warn('[AI] Retrying rejected output once with compact context');
+    if(i+1<candidates.length)console.log('[AI] Failover '+selected+' -> '+candidates[i+1]);
   }
   throw new Error('Empty AI response');
 }
