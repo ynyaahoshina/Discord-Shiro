@@ -37,7 +37,7 @@ const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 const model = retiredModel || !configuredModel ? defaultModel : configuredModel;
 let activeModel = model;
 if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Gemma');
-console.log('[CONFIG] revision=server-emotes-v15 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
+console.log('[CONFIG] revision=emote-and-ship-v16 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
