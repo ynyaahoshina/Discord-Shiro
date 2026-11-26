@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import { readFile } from 'node:fs/promises';
-import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput } from './dialogue.js';
+import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput, isEcho } from './dialogue.js';
 
 const env = process.env;
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
@@ -24,6 +24,44 @@ const client = new Client({
 });
 const last = new Map();
 let busy = false, day = '', used = 0;
+// Per-channel state: no follow-up quota, only a conservative eligibility gate.
+const followupStates=new Map();
+function followupState(channelId) {
+  if(!followupStates.has(channelId))followupStates.set(channelId,{ordinary:0,revision:0,timer:null});
+  return followupStates.get(channelId);
+}
+function noteChannelActivity(state) {
+  state.revision++;
+  if(state.timer!==null){
+    clearTimeout(state.timer);state.timer=null;
+    console.log('[FOLLOWUP] Canceled: new channel activity');
+  }
+}
+function followupInstruction(eligible) {
+  return eligible
+    ? '\nOptional double-texting: normally send a single complete reply. Only if an additional, genuinely distinct afterthought, comic beat, affectionate tease or important clarification would benefit from arriving separately, append a new line with the exact marker [[FOLLOWUP]], then one additional short natural chat message. Do not divide a normal answer just for length, repeat yourself, demand attention, or force a follow-up. If there is nothing worth adding, omit the marker entirely. At most one follow-up, with at most one approved media reaction across both messages. Never display the marker to a member.'
+    : '';
+}
+function separateFollowup(raw,eligible,truncated=false) {
+  const parts=String(raw||'').split(/\s*\[\[FOLLOWUP\]\]\s*/i);
+  return {primary:parts[0]||'',primaryTruncated:truncated&&parts.length===1,
+    followup:eligible&&!truncated&&parts.length===2?parts[1]||'':''};
+}
+function scheduleFollowup(state,revision,channel,content,delay=3000+Math.floor(Math.random()*5001)) {
+  if(!content||state.ordinary<5||state.revision!==revision||state.timer!==null)return false;
+  state.timer=setTimeout(async()=>{
+    state.timer=null;
+    if(state.revision!==revision)return;
+    try{
+      await channel.send({content,allowedMentions:{parse:[]}});
+      state.ordinary=0;
+      console.log('[FOLLOWUP] Sent optional second message');
+    }catch(error){console.warn('[FOLLOWUP] Send failed: '+safeError(error.name));}
+  },delay);
+  console.log('[FOLLOWUP] Scheduled optional second message delayMs='+delay);
+  return true;
+}
+
 const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
 const record = m => {
   const text = String(m.content || '').replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? '' : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
@@ -40,7 +78,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=nemotron-chain-v25 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=optional-followups-v26 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -189,11 +227,11 @@ async function readCompletion(response, started, selected) {
   }finally{try{await reader.cancel()}catch{}}
 }
 
-async function generate(context, authorId, channelId, guild) {
+async function generate(context, authorId, channelId, guild, followupEligible=false) {
   const acknowledgment=barePingReply(context);
   if(acknowledgment!==null){
     console.log('[AI] Bare ping acknowledged locally; no generation request');
-    return acknowledgment;
+    return {primary:acknowledgment,followup:''};
   }
   const profile = await loadPersonality();
   const isPartner = Boolean(profile.partnerId && authorId === profile.partnerId);
@@ -208,7 +246,7 @@ async function generate(context, authorId, channelId, guild) {
     const started = Date.now();
     const remaining=Math.min(requestTimeout,Math.floor((deadline-started)/slotsLeft));
     if(remaining<=0)throw new Error('AI generation deadline exceeded');
-    const messages = conversation(system, context);
+    const messages = conversation(system+followupInstruction(followupEligible), context);
     const options = {chat_template_kwargs:{enable_thinking:false}};
     console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     const response = await fetch(endpoint, {
@@ -229,21 +267,30 @@ async function generate(context, authorId, channelId, guild) {
     const choice=data.choices?.[0];
     const content=choice?.message?.content;
     const rawContent=typeof content==='string'?content:Array.isArray(content)?content.filter(x=>x?.type==='text'&&typeof x.text==='string').map(x=>x.text).join(''):'';
-    if(leakedOutput(rawContent,messages[0]?.content||'')){
-      console.warn('[AI] Rejected internal-instruction output; model='+selected);
-      return '';
+    const separated=separateFollowup(rawContent,followupEligible,choice?.finish_reason==='length');
+    const valid=(raw,ctx,truncated=false)=>{
+      if(!raw||leakedOutput(raw,messages[0]?.content||'')||sceneLeak(raw)||transcriptOutput(raw,ctx))return '';
+      const rendered=renderApprovedEmotes(clean(raw,truncated),ctx);
+      if(!rendered||recycled(rendered,ctx)||(isPartner&&wrongPartnerAddress(rendered)))return '';
+      return rendered;
+    };
+    const primary=valid(separated.primary,context,separated.primaryTruncated);
+    if(!primary){
+      console.warn('[AI] Rejected unusable primary reply; model='+selected);
+      return null;
     }
-    if(sceneLeak(rawContent)||transcriptOutput(rawContent,context)){
-      console.warn('[AI] Rejected narration, transcript-like or unrelated technical output; model='+selected);
-      return '';
+    // Preserve the normal media permission/cooldown. If the first message used
+    // a reaction, render the optional second message as text only.
+    const primaryPlain=renderApprovedEmotes(clean(separated.primary,separated.primaryTruncated),{...context,previous:[]});
+    const usedMedia=primary!==primaryPlain;
+    let followup='';
+    if(separated.followup){
+      const followCtx={...context,previous:usedMedia?[]:context.previous};
+      const candidate=valid(separated.followup,followCtx);
+      if(candidate&&candidate.length<=1200&&!isEcho(candidate,primary)&&!recycled(candidate,{...context,previous:[...(context.previous||[]),{text:primary}]}))followup=candidate;
     }
-    const rawCleaned=clean(rawContent,choice?.finish_reason==='length');
-    const cleaned=renderApprovedEmotes(rawCleaned,context);
-    const repeat=Boolean(cleaned&&recycled(cleaned,context));
-    const wrongAddress=Boolean(isPartner&&wrongPartnerAddress(cleaned));
-    if(wrongAddress)console.warn('[AI] Rejected inappropriate partner address');
-    console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' reasoning_present='+Boolean(choice?.message?.reasoning_content)+' completionTokens='+(data.usage?.completion_tokens??'unknown')+' visibleChars='+cleaned.length+' recycled='+repeat);
-    return cleaned&&!repeat&&!wrongAddress?cleaned:'';
+    console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' reasoning_present='+Boolean(choice?.message?.reasoning_content)+' completionTokens='+(data.usage?.completion_tokens??'unknown')+' visibleChars='+primary.length+' followup='+Boolean(followup));
+    return {primary,followup};
   };
   const candidates=modelChain.filter(m=>(modelCooldowns.get(m)||0)<=Date.now());
   if(!candidates.length){console.warn('[AI] All conversational endpoints cooling down');throw new Error('Empty AI response');}
@@ -273,7 +320,11 @@ client.once(Events.ClientReady, c => {
   console.log('[AI] Active model=' + model + ' endpoint=' + new URL(endpoint).origin + new URL(endpoint).pathname);
 });
 client.on(Events.MessageCreate, async m => {
-  if (m.author.bot || m.webhookId || !m.inGuild() || !guilds.has(m.guildId) || !channels.has(m.channelId)) return;
+  if (!m.inGuild() || !guilds.has(m.guildId) || !channels.has(m.channelId)) return;
+  const state=followupState(m.channelId);
+  if(m.author.id!==client.user.id&&!m.system)noteChannelActivity(state);
+  if (m.author.bot || m.webhookId || m.system) return;
+  const revision=state.revision;
   let referenced;
   try {
     if (m.reference?.messageId && (!m.reference.channelId || m.reference.channelId === m.channelId)) {
@@ -301,12 +352,14 @@ client.on(Events.MessageCreate, async m => {
       const typing = setInterval(() => m.channel.sendTyping().catch(() => {}), 8000);
       try {
         const history = await readThreadHistory(m);
-        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild);
-        const chunks = splitDiscord(answer);
+        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild, state.ordinary>=5&&state.revision===revision);
+        const chunks = splitDiscord(answer.primary);
         for (const [i, chunk] of chunks.entries()) {
           if (i === 0) await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false } });
           else await m.channel.send({ content: chunk, allowedMentions: { parse: [] } });
         }
+        state.ordinary=Math.min(5,state.ordinary+1);
+        if(answer.followup)scheduleFollowup(state,revision,m.channel,answer.followup);
       } finally { clearInterval(typing); }
     } catch (error) {
       console.warn('[AI] Interaction failed: ' + safeError(error.name) + ' ' + (error.message?.startsWith('AI HTTP ') || ['Empty AI response','AI generation timed out','AI generation deadline exceeded'].includes(error.message) ? safeError(error.message) : 'check connectivity or Discord permissions'));
