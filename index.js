@@ -140,7 +140,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=social-actions-v27 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=daily-initiative-v28 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -290,20 +290,22 @@ async function readCompletion(response, started, selected) {
 }
 
 async function generate(context, authorId, channelId, guild, followupEligible=false) {
-  const acknowledgment=barePingReply(context);
+  const acknowledgment=context.initiative?null:barePingReply(context);
   if(acknowledgment!==null){
     console.log('[AI] Bare ping acknowledged locally; no generation request');
     return {primary:acknowledgment,followup:''};
   }
   const profile = await loadPersonality();
   const isPartner = Boolean(profile.partnerId && authorId === profile.partnerId);
+  if(context.initiative&&!isPartner)throw new Error('Daily initiative partner verification failed');
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
   context = {...context, isPartner, emotes: allowEmotes(context) ? await resolveGuildEmotes(guild) : {}};
   context = {...context, previous:(context.previous||[]).filter(row=>!row.bot||!sceneLeak(row.text)), referenced:context.referenced?.bot&&sceneLeak(context.referenced.text)?null:context.referenced};
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
-  const social=socialOptions(context,authorId,profile.partnerId,client.user.id);
-  const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore})+'\n'+social.rules;
+  const social=context.initiative?{options:{},rules:'No social commands or action markers on this initiative.'}:socialOptions(context,authorId,profile.partnerId,client.user.id);
+  const initiativeRules=context.initiative?'\nYou are initiating a conversation with your established fictional partner, rather than replying to a message she just sent. The final user-role text is an internal scheduling cue, not her words. Choose a brief, natural in-character opening: a casual check-in, a relevant playful remark, a little flirtation or an interesting topic. Use recent conversation only when grounded; do not invent what she is doing, imply she has ignored you, demand a reply, guilt her, or mention scheduling or bot mechanics. Do not type any mention or name as a mandatory greeting; the app adds the actual ping. Send one conversational message with words, not just a reaction.':'';
+  const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore})+'\n'+social.rules+initiativeRules;
   const deadline=Date.now()+totalTimeout;
   const request = async (selected, slotsLeft) => {
     const started = Date.now();
@@ -343,7 +345,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
       return rendered;
     };
     const primary=valid(separated.primary,context,separated.primaryTruncated);
-    if(!primary){
+    if(!primary||(context.initiative&&!/[\p{L}]/u.test(renderApprovedEmotes(clean(separated.primary,separated.primaryTruncated),{...context,previous:[]})))){
       console.warn('[AI] Rejected unusable primary reply; model='+selected);
       return null;
     }
@@ -381,11 +383,95 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   }
   throw new Error('Empty AI response');
 }
+
+// Once-daily initiative: deterministic pseudo-random Manila time and Discord-backed
+// duplicate detection, so normal redeployments do not reset the daily schedule.
+const initiativePartner='399942598791266304';
+const initiativeChannel=env.DAILY_INITIATIVE_CHANNEL_ID?.trim()||(channels.size===1?[...channels][0]:'');
+const initiativeWindowMs=15*60*1000;
+const initiativeQuietMs=60*60*1000;
+let initiativeAttemptDay='';
+function manilaDate(now=Date.now()) {
+  return new Date(now+8*60*60*1000).toISOString().slice(0,10);
+}
+function initiativeSlot(date,channelId,partnerId=initiativePartner) {
+  // A deterministic day-specific hash keeps the random-looking time across restarts.
+  let hash=2166136261;
+  for(const char of date+'|'+channelId+'|'+partnerId)hash=Math.imul(hash^char.charCodeAt(0),16777619);
+  const minutes=8*60+((hash>>>0)%(15*60));
+  const midnight=Date.parse(date+'T00:00:00+08:00');
+  return {start:midnight+minutes*60000,end:Math.min(midnight+23*60*60000,midnight+minutes*60000+initiativeWindowMs),minute:minutes,midnight};
+}
+function isDailyPing(message,botId,partnerId,date) {
+  return message.author?.id===botId&&!message.reference?.messageId&&manilaDate(message.createdTimestamp)===date&&
+    String(message.content||'').startsWith('<@'+partnerId+'> ');
+}
+async function initiativeHistory(channel,slot,date,botId,partnerId) {
+  let before,previous=[];
+  // Scan to the beginning of today's scheduled window, even in a busy channel.
+  // If the bounded scan cannot establish absence of a previous ping, fail closed.
+  for(let page=0;page<10;page++){
+    const batch=await channel.messages.fetch({limit:100,...(before?{before}:{}),cache:false});
+    const entries=[...batch.values()].sort((a,b)=>BigInt(a.id)>BigInt(b.id)?-1:1);
+    if(page===0)previous=entries.filter(item=>!item.system&&!item.webhookId&&(!item.author.bot||item.author.id===botId)).reverse().map(record);
+    if(entries.some(m=>isDailyPing(m,botId,partnerId,date)))return {already:true,verified:true,previous};
+    if(entries.length<100||entries.at(-1)?.createdTimestamp<slot.start)return {already:false,verified:true,previous};
+    before=entries.at(-1).id;
+  }
+  return {already:false,verified:false,previous};
+}
+function recentPartnerConversation(previous,partnerId,botId,now) {
+  const byId=new Map(previous.map(r=>[r.id,r]));
+  return previous.some(r=>{
+    if(now-r.timestamp>=initiativeQuietMs||r.timestamp>now)return false;
+    const target=byId.get(r.replyTo);
+    if(r.authorId===partnerId)return (r.mentionedIds||[]).includes(botId)||target?.bot;
+    if(r.bot)return target?.authorId===partnerId||(r.mentionedIds||[]).includes(partnerId);
+    return false;
+  });
+}
+async function dailyInitiative() {
+  if(!initiativeChannel||!channels.has(initiativeChannel)||!client.isReady())return;
+  const now=Date.now(),today=manilaDate(now),slot=initiativeSlot(today,initiativeChannel);
+  if(now<slot.start||now>=slot.end||initiativeAttemptDay===today||busy)return;
+  if(day!==today){day=today;used=0;}
+  if(used>=dailyLimit)return;
+  initiativeAttemptDay=today;
+  busy=true;
+  try{
+    const profile=await loadPersonality();
+    if(profile.partnerId!==initiativePartner){console.warn('[INITIATIVE] Partner identity not verified; skipped');return;}
+    const channel=await client.channels.fetch(initiativeChannel);
+    if(!channel?.isTextBased()||!channel.guildId||!guilds.has(channel.guildId)||typeof channel.send!=='function')return;
+    const state=followupState(initiativeChannel),revision=state.revision;
+    const history=await initiativeHistory(channel,slot,today,client.user.id,initiativePartner);
+    if(history.already||!history.verified){console.log('[INITIATIVE] Prior daily ping or incomplete history; skipped');return;}
+    if(recentPartnerConversation(history.previous,initiativePartner,client.user.id,Date.now())){console.log('[INITIATIVE] Recent partner conversation; skipped');return;}
+    if(state.revision!==revision||Date.now()>=slot.end)return;
+    used++;
+    const current={id:'',authorId:initiativePartner,author:profile.partnerName||'Hinami',timestamp:Date.now(),bot:false,text:'Internal initiative cue: begin a natural conversation with your partner now.'};
+    const answer=await generate({previous:history.previous,current,referenced:null,initiative:true},initiativePartner,initiativeChannel,channel.guild,false);
+    if(!answer?.primary||answer.actionTarget||state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
+    // Prevent overlap during deployments with a stable daily Discord nonce.
+    const nonce='daily-'+today.replace(/-/g,'')+'-'+String(slot.minute);
+    const body=answer.primary.replace(/<@!?\d+>|<@&\d+>|@everyone|@here/gi,'').trim();
+    if(!body)return;
+    await channel.send({content:'<@'+initiativePartner+'> '+body,allowedMentions:{parse:[],users:[initiativePartner],repliedUser:false},nonce,enforceNonce:true});
+    console.log('[INITIATIVE] Sent daily partner ping date='+today);
+  }catch(error){console.warn('[INITIATIVE] Skipped after error: '+safeError(error.name));}
+  finally{busy=false;}
+}
+
 client.once(Events.ClientReady, c => {
   console.log('Online as ' + c.user.tag);
   console.log('[MEMORY] Depth=' + historyDepth + ' recent=' + recentDepth + ' outputBudget=' + outputBudget);
   console.log('[MEMORY] New conversation boundary=' + new Date(HISTORY_CUTOFF).toISOString());
   console.log('[AI] Active model=' + model + ' endpoint=' + new URL(endpoint).origin + new URL(endpoint).pathname);
+  if(initiativeChannel&&channels.has(initiativeChannel)){
+    console.log('[INITIATIVE] Enabled for existing allowed channel; once per Manila day, 08:00–23:00');
+    setInterval(()=>void dailyInitiative(),30000);
+    void dailyInitiative();
+  }else console.warn('[INITIATIVE] Disabled: multiple allowed channels or invalid initiative channel; set DAILY_INITIATIVE_CHANNEL_ID to the intended allowed channel');
 });
 client.on(Events.MessageCreate, async m => {
   if (!m.inGuild() || !guilds.has(m.guildId) || !channels.has(m.channelId)) return;
