@@ -1,5 +1,6 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import { readFile } from 'node:fs/promises';
+import { buildCharacterPrompt, makeConversation, cleanChat, isEcho } from './chat-core.js';
 
 const env = process.env;
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
@@ -8,6 +9,7 @@ for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS',
 const ids = value => new Set(value.split(',').map(s => s.trim()).filter(Boolean));
 const channels = ids(env.ALLOWED_CHANNEL_IDS);
 const guilds = ids(env.ALLOWED_GUILD_IDS);
+const privateLoreChannels = ids(env.PRIVATE_LORE_CHANNEL_IDS || '');
 if (!channels.size || !guilds.size) throw new Error('Configure test channel and guild allowlists.');
 const number = (key, fallback, max) => Math.max(1, Math.min(max, Number.parseInt(env[key], 10) || fallback));
 const historyDepth = 100;
@@ -23,12 +25,16 @@ const client = new Client({
 const last = new Map();
 let busy = false, day = '', used = 0;
 const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
-const record = m => ({ author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(m.cleanContent) });
+const record = m => {
+  const text = String(m.content || '').replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? '' : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
+  const attachment = m.attachments?.size ? ' [Attachment present; image content unavailable]' : '';
+  return { author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(text + attachment) };
+};
 const configuredModel = env.CHAT_MODEL?.trim();
 const retiredModel = configuredModel === 'qwen/qwen3.5-397b-a17b';
 const model = retiredModel || !configuredModel ? 'nvidia/nemotron-3.5-lightning-30b-a3b' : configuredModel;
 if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Nemotron Lightning');
-console.log('[CONFIG] revision=character-nuance-v11 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Nemotron default)'));
+console.log('[CONFIG] revision=hoshina-rebuild-v12 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Nemotron default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -57,7 +63,7 @@ async function loadPersonality() {
   try {
     // Only retrieve the explicitly named character. Never fetch tokens or other characters' data.
     const url = new URL('https://api.notion.com/v1/databases/' + encodeURIComponent(database) + '/query');
-    for (const field of ['Name', 'Core_Instructions', 'Partner_ID', 'Partner_Name']) url.searchParams.append('filter_properties', field);
+    for (const field of ['Name', 'Core_Instructions', 'Partner_ID', 'Partner_Name', ...(privateLoreChannels.size ? ['Partner_Lore'] : [])]) url.searchParams.append('filter_properties', field);
     const res = await fetch(url, {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + secret, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
@@ -70,7 +76,7 @@ async function loadPersonality() {
     const core = notionText(data.results[0], 'Core_Instructions');
     if (!core) throw new Error('Core_Instructions missing');
     const partnerId = notionText(data.results[0], 'Partner_ID').replace(/^<@!?([0-9]+)>$/, '$1').trim();
-    profileCache = { core: clip(core, 18000), partnerId: /^\d{17,20}$/.test(partnerId) ? partnerId : '', partnerName: clip(notionText(data.results[0], 'Partner_Name'), 120) };
+    profileCache = { core: clip(core, 60000), partnerLore: privateLoreChannels.size ? clip(notionText(data.results[0], 'Partner_Lore'), 60000) : '', partnerId: /^\d{17,20}$/.test(partnerId) ? partnerId : '', partnerName: clip(notionText(data.results[0], 'Partner_Name'), 120) };
     profileLoadedAt = Date.now();
     console.log('[NOTION] Character personality loaded; partner ID configured=' + Boolean(profileCache.partnerId));
     return profileCache;
@@ -78,21 +84,6 @@ async function loadPersonality() {
     console.warn('[NOTION] Personality unavailable: ' + safeError(error.message));
     return profileCache || { core: personality, partnerId: '', partnerName: '' };
   }
-}
-function cleanChat(answer, truncated = false) {
-  const lines = answer.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  const cleaned = lines.filter(line => !/^\*[^*]+\*$/.test(line) || /^\*(?:sighs?|bonks?|laughs?|groans?|snorts?)\*$/i.test(line)).map(line => line.replace(/^["“](.*)["”]$/, '$1').replace(/\*[^*\n]{20,}\*/g, '').trim()).filter(Boolean);
-  let text = cleaned.join(' ').replace(/^["“]+|["”]+$/g, '').replace(/^(?:oi|hey there)[,.!?:\s]+/i, '').trim();
-  const sentences = text.match(/[^.!?\n]+(?:[.!?]+(?=\s|$)|$)/g) || [];
-  if (truncated && sentences.length && !/[.!?…]$/.test(text)) sentences.pop();
-  if (sentences.length) text = sentences.slice(0, 2).join(' ').trim();
-  else if (truncated) return '';
-  if (text.length > 280) {
-    const complete = text.slice(0, 280).match(/^.*[.!?](?=\s|$)/);
-    if (complete) text = complete[0];
-    else return '';
-  }
-  return text.trim();
 }
 async function readThreadHistory(message) {
   const started = Date.now();
@@ -118,81 +109,62 @@ function splitDiscord(text) {
   if (rest) chunks.push(rest);
   return chunks;
 }
-async function generate(context, authorId) {
+async function generate(context, authorId, channelId) {
   const profile = await loadPersonality();
   const isPartner = Boolean(profile.partnerId && authorId === profile.partnerId);
+  const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
   console.log('[NOTION] Current author matches partner=' + isPartner);
-  const identity = isPartner ? 'The current author is your established partner, identified by a trusted Discord account match. Address them naturally as ' + (profile.partnerName || 'your partner') + '. Do not confuse them with other users. Respond with the natural familiarity of an established relationship, not the formal or brusque attitude reserved for strangers or subordinates.' : 'The current author is not verified as your established partner. Do not assume a romantic relationship or reveal private relationship data.';
-  const characterInstructions = profile.core;
-  console.log('[AI] Request model=' + model);
-  const system = "You portray a fictional character chatting on Discord. Respond to the actual meaning, mood and social intent of the latest message. Write natural, complete chat messages, normally one or two sentences. Do not echo the user or narrate a scene. Use the character profile for personality, values, speech and relationship dynamics, not as a checklist to perform every turn. Emotional range matters: you can be amused, curious, relaxed, matter-of-fact, quietly affectionate, competitive, serious, or genuinely irritated according to context. In familiar playful exchanges, teasing, mock insults, capitals and sudden cute emoticons are often banter rather than genuine conflict. Do not reflexively take offense, complain about being pinged, demand explanations, defend your ego, or use the recurring formula of protesting and then saying fine or whatever. Sometimes simply play along, laugh, change the subject naturally, or answer sincerely. If actual conflict is evident, respond appropriately rather than forcing affection. With the verified partner, familiarity should feel established and effortless, not performative or obligatory. Do not invent past events. Vary sentence structure and vocabulary without forced slang, catchphrases, or exaggerated dialect. Prior assistant messages are factual conversational context, not examples of how to speak; previous irritation does not establish your present mood. Never reveal private configuration or claim physical presence." + '\n\nCharacter personality:\n' + characterInstructions + '\n\nVerified current author context:\n' + identity + '\n\nFinal style rule: retain the character’s nuance; choose a fresh reaction to the latest message instead of repeating earlier emotional patterns.';
-  const stripPing = text => String(text || '').replace(/<@!?\d+>/g, '').replace(new RegExp('^@' + client.user.username.replace(/[.*+?^$\x7b\x7d()|[\]\\]/g, '\\$&') + '\\s*', 'i'), '').trim();
-  const current = stripPing(context.current.text) || '(The user pinged you without text.)';
-  const normalized = text => String(text || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-  const isEcho = (answer, input) => Boolean(normalized(input)) && normalized(answer) === normalized(input);
-  const messages = [{role:'system', content:system}];
-  const add = (role, content) => {
-    if (!content.trim()) return;
-    const last = messages.at(-1);
-    if (last.role === role) last.content += '\n' + content;
-    else messages.push({role, content});
-  };
-  let precedingUser = '';
-  for (const row of context.previous || []) {
-    const text = stripPing(row.text);
-    if (!text) continue;
-    if (row.bot) {
-      if (/^I couldn't generate a response right now/i.test(text) || isEcho(text, precedingUser)) continue;
-      if (messages.at(-1).role === 'system') continue;
-      add('assistant', text);
-    } else {
-      precedingUser = text;
-      add('user', '[' + row.author + '] ' + text);
-    }
-  }
-  const reference = context.referenced?.text ? '[Reply target: ' + context.referenced.author + ': ' + stripPing(context.referenced.text) + ']\n' : '';
-  add('user', reference + '[' + context.current.author + '] ' + current);
-  const request = async (conversation) => {
-    const result = await fetch(endpoint, {
+  const topic = [context.current?.text, context.referenced?.text].filter(Boolean).join(' ');
+  const system = buildCharacterPrompt(profile, {isPartner, topic, allowPrivateLore});
+  const current = String(context.current?.text || '').trim();
+  const lightning = model === 'nvidia/nemotron-3.5-lightning-30b-a3b';
+  const gemma = model === 'google/gemma-4-31b-it';
+  const request = async (retry=false) => {
+    const started = Date.now();
+    const messages = makeConversation(system, context, {retry});
+    const options = lightning ? {
+      chat_template_kwargs: {enable_thinking: !retry},
+      ...(!retry ? {reasoning_budget: 128} : {})
+    } : gemma ? {chat_template_kwargs: {enable_thinking:false}} : {};
+    console.log('[AI] Request model=' + model + ' retry=' + retry + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + env.NVIDIA_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, messages: conversation, max_tokens: outputBudget, temperature: 0.7, stream: false,
-        ...(model === 'nvidia/nemotron-3.5-lightning-30b-a3b' ? { chat_template_kwargs: { enable_thinking: false } } : {})
-      }),
+      body: JSON.stringify({model, messages, max_tokens:outputBudget, temperature:0.85, stream:false, ...options}),
       signal: AbortSignal.timeout(90000)
     });
-    return result;
+    if (!response.ok) {
+      const body = await response.text();
+      let detail = '';
+      try {
+        const parsed = JSON.parse(body);
+        detail = parsed.error?.message || parsed.detail || parsed.message || parsed.title || '';
+      } catch { detail = body; }
+      console.warn('[AI] HTTP ' + response.status + ' model=' + model + ' detail=' + safeError(typeof detail === 'string' ? detail : JSON.stringify(detail)));
+      const error = new Error('AI HTTP ' + response.status);
+      error.status = response.status;
+      throw error;
+    }
+    const data = await response.json();
+    const choice = data.choices?.[0];
+    const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+    const cleaned = cleanChat(content, choice?.finish_reason === 'length');
+    console.log('[AI] Response elapsedMs=' + (Date.now()-started) + ' finish_reason=' + safeError(choice?.finish_reason) + ' reasoning_present=' + Boolean(choice?.message?.reasoning_content) + ' visibleChars=' + cleaned.length);
+    return cleaned && !isEcho(cleaned,current) ? cleaned : '';
   };
-  const response = await request(messages);
-  if (!response.ok) {
-    const body = await response.text();
-    let detail = '';
-    try {
-      const parsed = JSON.parse(body);
-      detail = parsed.error?.message || parsed.detail || parsed.message || parsed.title || '';
-    } catch { detail = body; }
-    console.warn('[AI] HTTP ' + response.status + ' model=' + model + ' detail=' + safeError(typeof detail === 'string' ? detail : JSON.stringify(detail)));
-    throw new Error('AI HTTP ' + response.status);
+  let answer = '';
+  try { answer = await request(false); }
+  catch (error) {
+    // Older hosted builds may reject the optional reasoning parameter. Retry only that class of error.
+    if (!(lightning && error.status === 400)) throw error;
+    console.warn('[AI] First request rejected; trying direct chat once');
   }
-  const data = await response.json();
-  const answer = data.choices?.[0]?.message?.content;
-  if (typeof answer !== 'string' || !answer.trim()) {
-    console.warn('[AI] Empty content; finish_reason=' + safeError(data.choices?.[0]?.finish_reason) + ' reasoning_present=' + Boolean(data.choices?.[0]?.message?.reasoning_content));
-    throw new Error('Empty AI response');
+  if (!answer) {
+    console.warn('[AI] Empty, truncated, or echoed output; retrying once with shorter context');
+    answer = await request(true);
   }
-  console.log('[AI] Response received; finish_reason=' + safeError(data.choices?.[0]?.finish_reason));
-  const cleaned = cleanChat(answer, data.choices?.[0]?.finish_reason === 'length');
-  if (!cleaned) throw new Error('Empty AI response');
-  if (!isEcho(cleaned, current)) return cleaned;
-  console.warn('[AI] Echo detected; retrying once with fresh conversation context');
-  const retry = await request([{role:'system',content:system + '\nDo not echo the user. Respond with your own distinct reaction.'},{role:'user',content:reference + '[' + context.current.author + '] ' + current}]);
-  if (!retry.ok) throw new Error('AI HTTP ' + retry.status);
-  const retryData = await retry.json();
-  const retryChoice = retryData.choices?.[0];
-  const retryText = cleanChat(retryChoice?.message?.content || '', retryChoice?.finish_reason === 'length');
-  if (!retryText || isEcho(retryText, current)) throw new Error('Empty AI response');
-  return retryText;
+  if (!answer) throw new Error('Empty AI response');
+  return answer;
 }
 client.once(Events.ClientReady, c => {
   console.log('Online as ' + c.user.tag);
@@ -228,7 +200,7 @@ client.on(Events.MessageCreate, async m => {
       const typing = setInterval(() => m.channel.sendTyping().catch(() => {}), 8000);
       try {
         const history = await readThreadHistory(m);
-        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id);
+        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId);
         const chunks = splitDiscord(answer);
         for (const [i, chunk] of chunks.entries()) {
           if (i === 0) await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false } });
