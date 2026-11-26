@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import { readFile } from 'node:fs/promises';
-import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, withoutEmotes } from './dialogue.js';
+import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE } from './dialogue.js';
 
 const env = process.env;
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
@@ -37,7 +37,7 @@ const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 const model = retiredModel || !configuredModel ? defaultModel : configuredModel;
 let activeModel = model;
 if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Gemma');
-console.log('[CONFIG] revision=plain-chat-v14 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
+console.log('[CONFIG] revision=server-emotes-v15 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -112,10 +112,31 @@ function splitDiscord(text) {
   if (rest) chunks.push(rest);
   return chunks;
 }
-async function generate(context, authorId, channelId) {
+const emojiRefresh = new Map();
+async function resolveGuildEmotes(guild) {
+  if (!guild) return {};
+  let emojis = guild.emojis.cache;
+  const names = new Set([...emojis.values()].map(emoji=>emoji.name));
+  if (Object.keys(EMOTE_GUIDE).some(name=>!names.has(name)) && Date.now()-(emojiRefresh.get(guild.id)||0)>=300000) {
+    emojiRefresh.set(guild.id,Date.now());
+    try { emojis = await guild.emojis.fetch(); }
+    catch(error) { console.warn('[EMOTES] Guild emoji refresh unavailable: '+safeError(error.name)); }
+  }
+  const me = guild.members.me;
+  const result = {};
+  for (const emoji of emojis.values()) {
+    if (!Object.hasOwn(EMOTE_GUIDE,emoji.name) || emoji.available === false) continue;
+    if (emoji.roles?.cache?.size && !emoji.roles.cache.some(role=>me?.roles.cache.has(role.id))) continue;
+    result[emoji.name] = '<'+(emoji.animated?'a':'')+':'+emoji.name+':'+emoji.id+'>';
+  }
+  console.log('[EMOTES] Approved available='+Object.keys(result).length+'/'+Object.keys(EMOTE_GUIDE).length);
+  return result;
+}
+async function generate(context, authorId, channelId, guild) {
   const profile = await loadPersonality();
   const isPartner = Boolean(profile.partnerId && authorId === profile.partnerId);
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
+  context = {...context, isPartner, emotes: allowEmotes(context) ? await resolveGuildEmotes(guild) : {}};
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
   const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore});
@@ -143,7 +164,7 @@ async function generate(context, authorId, channelId) {
     const data=await response.json();
     const choice=data.choices?.[0];
     const rawCleaned=clean(typeof choice?.message?.content==='string'?choice.message.content:'',choice?.finish_reason==='length');
-    const cleaned=allowEmotes(context)?rawCleaned:withoutEmotes(rawCleaned);
+    const cleaned=renderApprovedEmotes(rawCleaned,context);
     const repeat=Boolean(cleaned&&recycled(cleaned,context));
     console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' visibleChars='+cleaned.length+' recycled='+repeat);
     return cleaned&&!repeat?cleaned:'';
@@ -199,7 +220,7 @@ client.on(Events.MessageCreate, async m => {
       const typing = setInterval(() => m.channel.sendTyping().catch(() => {}), 8000);
       try {
         const history = await readThreadHistory(m);
-        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId);
+        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild);
         const chunks = splitDiscord(answer);
         for (const [i, chunk] of chunks.entries()) {
           if (i === 0) await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false } });
