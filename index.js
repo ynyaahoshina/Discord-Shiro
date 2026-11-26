@@ -37,7 +37,7 @@ const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 const model = retiredModel || !configuredModel ? defaultModel : configuredModel;
 let activeModel = model;
 if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Gemma');
-console.log('[CONFIG] revision=thread-context-v19 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
+console.log('[CONFIG] revision=chat-only-v20 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -169,7 +169,7 @@ async function generate(context, authorId, channelId, guild) {
       return '';
     }
     if(transcriptOutput(rawContent,context)){
-      console.warn('[AI] Rejected transcript-like or unrelated technical output; model='+selected);
+      console.warn('[AI] Rejected narration, transcript-like or unrelated technical output; model='+selected);
       return '';
     }
     const rawCleaned=clean(rawContent,choice?.finish_reason==='length');
