@@ -14,7 +14,7 @@ if (!channels.size || !guilds.size) throw new Error('Configure test channel and 
 const number = (key, fallback, max) => Math.max(1, Math.min(max, Number.parseInt(env[key], 10) || fallback));
 const historyDepth = 100;
 const recentDepth = 100;
-const outputBudget = number('RESPONSE_TOKEN_BUDGET', 500, 500);
+const outputBudget = number('RESPONSE_TOKEN_BUDGET', 1024, 1024);
 const cooldown = Math.min(number('COOLDOWN_MS', 1000, 300000), 1000);
 const dailyLimit = number('DAILY_REQUEST_LIMIT', 200, 10000);
 const personality = await readFile(new URL('./personality.txt', import.meta.url), 'utf8');
@@ -32,12 +32,14 @@ const record = m => {
 };
 const configuredModel = env.CHAT_MODEL?.trim();
 const retiredModels = new Set(['qwen/qwen3.5-397b-a17b','google/gemma-4-31b-it']);
-const defaultModel = 'mistralai/mistral-large-4-1t-a52b';
-const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
-const model = !configuredModel || retiredModels.has(configuredModel) ? defaultModel : configuredModel;
+const defaultModel = 'meta/muse-glimmer-30b';
+const fallbackModel = 'z-ai/glm-5.3-flash';
+// Legacy conversational selections are intentionally superseded by the new default.
+const legacyChatModels = new Set(['mistralai/mistral-large-4-1t-a52b','nvidia/nemotron-3.5-lightning-30b-a3b']);
+const model = !configuredModel || retiredModels.has(configuredModel) || legacyChatModels.has(configuredModel) ? defaultModel : configuredModel;
 let activeModel = model;
-if(retiredModels.has(configuredModel)) console.warn('[CONFIG] Ignoring retired model; using current default');
-console.log('[CONFIG] revision=model-routing-v22 selectedModel='+safeModel(model));
+if(retiredModels.has(configuredModel)||legacyChatModels.has(configuredModel)) console.warn('[CONFIG] Ignoring retired or superseded chat model; using Muse Glimmer');
+console.log('[CONFIG] revision=muse-chat-v23 selectedModel='+safeModel(model));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -164,15 +166,16 @@ async function generate(context, authorId, channelId, guild) {
   const request = async (selected, retry=false) => {
     const started = Date.now();
     const messages = conversation(system, context, {retry});
-    const options = selected === fallbackModel ? {
-      chat_template_kwargs: {enable_thinking: !retry},
-      ...(!retry ? {reasoning_budget: 128} : {})
-    } : selected === 'mistralai/mistral-large-4-1t-a52b' ? {reasoning_effort:'low'} : {};
+    const options = selected === defaultModel
+      ? {chat_template_kwargs:{reasoning_strength:'low'},top_p:0.95}
+      : selected === fallbackModel
+      ? {reasoning_effort:'low',chat_template_kwargs:{clear_thinking:true}}
+      : {};
     console.log('[AI] Request model=' + selected + ' retry=' + retry + ' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     const response = await fetch(endpoint, {
       method:'POST',
       headers:{Authorization:'Bearer '+env.NVIDIA_API_KEY,'Content-Type':'application/json'},
-      body:JSON.stringify({model:selected,messages,max_tokens:outputBudget,temperature:0.7,stream:false,...options}),
+      body:JSON.stringify({model:selected,messages,max_tokens:outputBudget,temperature:0.8,stream:false,...options}),
       signal:AbortSignal.timeout(90000)
     });
     if(!response.ok){
@@ -199,12 +202,12 @@ async function generate(context, authorId, channelId, guild) {
     const repeat=Boolean(cleaned&&recycled(cleaned,context));
     const wrongAddress=Boolean(isPartner&&wrongPartnerAddress(cleaned));
     if(wrongAddress)console.warn('[AI] Rejected inappropriate partner address');
-    console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' visibleChars='+cleaned.length+' recycled='+repeat);
+    console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' reasoning_present='+Boolean(choice?.message?.reasoning_content)+' completionTokens='+(data.usage?.completion_tokens??'unknown')+' visibleChars='+cleaned.length+' recycled='+repeat);
     return cleaned&&!repeat&&!wrongAddress?cleaned:'';
   };
   let selected=activeModel;
   let calls=0;
-  const unavailable=error=>[403,404,410].includes(error?.status);
+  const unavailable=error=>[403,404,410,503].includes(error?.status);
   // Availability failures do not consume the next model's first quality attempt.
   // At most three API calls per Discord interaction; never retry rate limits.
   while(calls<3){
@@ -215,7 +218,7 @@ async function generate(context, authorId, channelId, guild) {
       if(answer)return answer;
     }catch(error){
       if(unavailable(error)&&selected!==fallbackModel){
-        console.warn('[AI] Primary unavailable; switching to Nemotron until next restart');
+        console.warn('[AI] Primary unavailable; switching to GLM Flash until next restart');
         selected=fallbackModel;activeModel=selected;continue;
       }
       if(error.status!==400)throw error;
