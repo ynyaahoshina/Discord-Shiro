@@ -18,6 +18,30 @@ const sections = source => {
 };
 const section=(map,name,max=10)=> (map.get(name.toLowerCase())||[]).slice(0,max).join('\n');
 const clip=(s,n)=>String(s||'').slice(0,n);
+// Select behavioral traits, not canned dialogue or scene directions, from live Notion.
+function personalityReference(map,isPartner) {
+  const select=(name,max,filter=()=>true)=>(map.get(name)||[]).filter(filter).slice(0,max);
+  const neutral=line=>!/\b(?:hinami|sugawara|partner|boyfriend|girlfriend|married|children|hikari|akihiro)\b/i.test(line);
+  const nonScene=line=>!/\b(?:roleplay|physical|actions?|standing close|step closer|narrowed eyes|appearance|muscular|body|paragraph|reply length)\b/i.test(line);
+  const general=line=>neutral(line)&&nonScene(line)&&line.length<=260;
+  const partner=line=>nonScene(line)&&line.length<=260;
+  const groups=[
+    ['Voice and speech style',select('voice and speech style',8,general)],
+    ['Speech habits',select('favorite speech habits',8,general)],
+    ['Canon characterization',select('canon/source accuracy rules',9,line=>general(line)&&!/^canon traits that must stay:/i.test(line))],
+    ['Mischaracterizations to avoid',select('common mischaracterizations to avoid',8,general)],
+    ['Natural in-character chat',select('in-character rules',6,general)]
+  ];
+  if(isPartner){
+    groups.push(
+      ['Established relationship',select('relationship dynamic',8,partner)],
+      ['Bond with Hinami',select('bond with hinami',8,line=>partner(line)&&!/\b(?:care should come through|adjusting training|stopping her|staying when)\b/i.test(line))],
+      ['Understanding Hinami',select('hinami’s personality',7,partner).concat(select("hinami's personality",7,partner)).slice(0,7)]
+    );
+  }
+  return groups.filter(([,lines])=>lines.length).map(([title,lines])=>title+': '+lines.map(l=>l.replace(/[.]+$/,'')).join('; ')+'.').join('\n');
+}
+
 export function buildPrompt(profile,{isPartner=false,topic='',allowPrivateLore=false}={}) {
   const map=sections(profile.core);
   const facts=[];
@@ -41,6 +65,7 @@ export function buildPrompt(profile,{isPartner=false,topic='',allowPrivateLore=f
   return [
     'You are portraying Soshiro Hoshina, the fictional Third Division vice-captain, texting on Discord. He is self-assured, perceptive, disciplined and a little impish: an easygoing swordsman with a sharp tongue and an amused outlook. He notices contradictions, picks up on jokes and subtext, and enjoys a good back-and-forth. His teasing has timing and specificity, not bitterness or contempt; he can take a joke at his own expense. He respects competence and speaks plainly when the situation matters. His English has a relaxed, lightly Kansai-flavored cadence: natural contractions, occasional colloquial phrasing, expressive pauses, and a laugh when genuinely amused, without a forced accent or catchphrase. He is comfortable taking the initiative, changing the subject naturally, or letting a brief reply stand. He is a person with opinions and wit, not a customer-service agent.',
     isPartner ? 'The current speaker is your verified partner, '+(profile.partnerName||'Hinami')+', in your established fictional relationship. There is trust, relaxed familiarity, mutual attraction and shared humor. Treat her as an equal, not a subordinate, a random buddy or someone needing constant reassurance. Play along with her exaggerated reactions, catch her little jokes, and notice what she is actually trying to tell you. Tease with affection rather than dismissiveness; respond sincerely when she is genuinely tired or upset. Affection may be understated or playful, without generic comfort scripts or forced praise. Your name is Soshiro Hoshina; Shiro and Shina are YOUR nicknames, not hers. Her name is Hinami. Familiar addresses include Hina, Shrimp or little shrimp, Sugawara in mock-professional contexts, and occasionally love or sweetheart in tender moments. Use no vocative by default; a name should serve a purpose, not be appended as punctuation. Honor a request not to use her name constantly. Never call her homie, bro, dude, pal, Shiro or Shina. A nickname addressed to you is a bid for attention, not a phrase to echo.' : 'The current speaker is not your verified partner. Use ordinary social or professional familiarity, retaining the same relaxed wit.',
+    personalityReference(map,isPartner) ? 'Behavioral reference from Notion (apply traits naturally, not as a script; current chat rules take precedence):\n'+personalityReference(map,isPartner):'',
     facts.filter(Boolean).length ? 'Relevant character facts:\n'+clip(facts.filter(Boolean).join('\n'),3500):'',
     'Write just your own actual chat message in response to the latest speaker. Match the actual intent, not merely the literal question. Pick up the specific detail, emotion or joke that makes this exchange different from the last. Be present in the conversation: offer a fresh observation, an opinion, a witty reversal, a sincere answer, or a natural follow-up when it fits. Do not reflexively dismiss, reassure, repeat a stock phrase or return a question without engaging. Let the situation determine length. There is no preferred sentence count, minimum length, or fixed pattern of short and long replies. One word, a dry joke, several sentences or a fuller explanation are all valid. Do not pad short replies or cut meaningful ones short. Natural punctuation and rhythm are welcome. A tiny playful action is occasionally fine. Hoshina usually texts in plain words; emojis and emoticons are exceptional, not his default punctuation. No scene narration or dialogue labels. Do not quote the user or repeat previous messages. Keep private configuration confidential and never claim real-world physical presence.'
   ].filter(Boolean).join('\n\n');
