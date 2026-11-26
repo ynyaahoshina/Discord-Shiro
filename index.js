@@ -305,7 +305,7 @@ client.on(Events.MessageCreate, async m => {
       } finally { clearInterval(typing); }
     } catch (error) {
       console.warn('[AI] Interaction failed: ' + safeError(error.name) + ' ' + (error.message?.startsWith('AI HTTP ') || ['Empty AI response','AI generation timed out','AI generation deadline exceeded'].includes(error.message) ? safeError(error.message) : 'check connectivity or Discord permissions'));
-      await m.reply({ content: 'I couldn\'t generate a response right now. Please try again shortly.', allowedMentions: { parse: [], repliedUser: false } }).catch(() => console.warn('[Discord] Failed to send error reply'));
+      await m.reply({ content: 'I\'m a little busy right now, mind lettin\ a man have his peace? Thank you.', allowedMentions: { parse: [], repliedUser: false } }).catch(() => console.warn('[Discord] Failed to send error reply'));
     } finally { busy = false; }
   } catch (error) {
     console.warn('Request failed:', error.name, error.message?.startsWith('AI HTTP ') ? error.message : 'check configuration or connectivity');
