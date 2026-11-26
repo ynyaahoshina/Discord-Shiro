@@ -28,7 +28,10 @@ export function buildPrompt(profile,{isPartner=false,topic='',allowPrivateLore=f
     const date=(map.get('core identity')||[]).find(s=>/started dating/i.test(s));
     if (date && /\b(?:date|dating|anniversary|together|how long)\b/i.test(topic)) facts.push(date);
     if (/\b(?:birthday|age|division|rank|recon|arnis|weapon|suit|transfer|philippines|training|combat|remember|know me|who am i)\b/i.test(topic)) facts.push(section(map,'My OC/self-insert context',18));
-    if (/\b(?:children|family|hikari|akihiro|married|marriage|son|daughter)\b/i.test(topic)) facts.push(section(map,'Family lore',7));
+    if (/\b(?:children|family|hikari|akihiro|married|marriage|son|daughter|peng+goleng*|peng+golen+g*|little fish|okan|oton)\b|HikariHoshinaPenggolenbyMax/i.test(topic)) {
+      facts.push(section(map,'Family lore',7));
+      facts.push('In your established family continuity, Penggoleng (also Penggolen) is the affectionate nickname for Hikari Hoshina, your daughter with Hinami, not a separate character or a pet. Hikari calls Hinami okan and you oton. Understand references to Penggoleng naturally without introducing or explaining her every time.');
+    }
     if (allowPrivateLore && /\b(?:remember|who am i|know me|backstory|met|history|relationship|dating|anniversary)\b/i.test(topic)) {
       const lore=sections(profile.partnerLore);
       facts.push(section(lore,'Core Identification',15),section(lore,'How I Know Her',7));
@@ -73,7 +76,7 @@ export const EMOTE_GUIDE = Object.freeze({
   IzumiEat: 'Izumi eating; food talk or playfully watching something unfold.',
   HinamiHeart: 'Hinami heart reaction; genuine affectionate moments with the verified partner.',
   HinamiPee: 'Toilet joke reaction; only when the conversation calls for that specific silly joke.',
-  HikariHoshinaPenggolenbyMax: 'Little penguin-like Hikari; Hikari or family jokes with the verified partner.',
+  HikariHoshinaPenggolenbyMax: 'Penggoleng, Hikari Hoshina, your daughter with Hinami in the family continuity; use for relevant family moments with the verified partner.',
   HoshinaLaugh: 'Hoshina laughing; something genuinely funny, not every joke.'
 });
 const emoteToken = /<a?:([A-Za-z0-9_]+):\d+>|:([A-Za-z0-9_]{2,}):/g;
@@ -114,7 +117,7 @@ const INCOMING_EMOTES = Object.freeze({
   IzumiEat: 'eating, snacking or watching the situation unfold',
   HinamiHeart: 'affection or a heart reaction',
   HinamiPee: 'silly toilet-humor reaction',
-  HikariHoshinaPenggolenbyMax: 'little penguin-like Hikari or family reaction',
+  HikariHoshinaPenggolenbyMax: 'Penggoleng (Hikari Hoshina), Hoshina and Hinami’s daughter in the family continuity; family reaction',
   HoshinaLaugh: 'laughter or amusement'
 });
 const incomingNames = new Map(Object.entries(INCOMING_EMOTES).map(([name,meaning])=>[name.toLowerCase(),meaning]));
