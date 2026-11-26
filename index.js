@@ -37,7 +37,7 @@ const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 const model = retiredModel || !configuredModel ? defaultModel : configuredModel;
 let activeModel = model;
 if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Gemma');
-console.log('[CONFIG] revision=chat-only-v20 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
+console.log('[CONFIG] revision=ping-and-dialogue-v21 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -132,11 +132,32 @@ async function resolveGuildEmotes(guild) {
   console.log('[EMOTES] Approved available='+Object.keys(result).length+'/'+Object.keys(EMOTE_GUIDE).length);
   return result;
 }
+// Extra guard for first-person scene prose and inline dialogue labels.
+function sceneLeak(value) {
+  const text=String(value||'');
+  return /\b(?:the |my )?(?:text |message )?notification(?: light)?\s+(?:blinks?|lights? up|flashes|pops? up|buzzes)\b/i.test(text)
+    || /\b(?:my|his|her|the) (?:phone|screen)\s+(?:blinks?|lights? up|flashes|buzzes|vibrates)\b/i.test(text)
+    || /\bI\s+(?:open|check|read)\s+(?:the|my)\s+(?:chat|phone|screen|message)\s+(?:and\s+)?(?:tilt|smile|smirk|glance|look|tap|type|sigh|chuckle)\b/i.test(text)
+    || /(?:^|[\s.!?])(?:Soshiro(?: Hoshina)?|Hoshina|Hinami|Narrator)\s*:\s*["“]/i.test(text);
+}
+function barePingReply(context) {
+  if(String(context.current?.text||'').trim())return null;
+  const choices=['Hm?','Yeah?','What is it?'];
+  const id=String(context.current?.id||'0');
+  const n=Number(id.slice(-4));
+  return choices[Number.isFinite(n)?n%choices.length:0];
+}
 async function generate(context, authorId, channelId, guild) {
+  const acknowledgment=barePingReply(context);
+  if(acknowledgment!==null){
+    console.log('[AI] Bare ping acknowledged locally; no generation request');
+    return acknowledgment;
+  }
   const profile = await loadPersonality();
   const isPartner = Boolean(profile.partnerId && authorId === profile.partnerId);
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
   context = {...context, isPartner, emotes: allowEmotes(context) ? await resolveGuildEmotes(guild) : {}};
+  context = {...context, previous:(context.previous||[]).filter(row=>!row.bot||!sceneLeak(row.text)), referenced:context.referenced?.bot&&sceneLeak(context.referenced.text)?null:context.referenced};
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
   const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore});
@@ -168,7 +189,7 @@ async function generate(context, authorId, channelId, guild) {
       console.warn('[AI] Rejected internal-instruction output; model='+selected);
       return '';
     }
-    if(transcriptOutput(rawContent,context)){
+    if(sceneLeak(rawContent)||transcriptOutput(rawContent,context)){
       console.warn('[AI] Rejected narration, transcript-like or unrelated technical output; model='+selected);
       return '';
     }
