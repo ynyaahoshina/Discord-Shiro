@@ -105,6 +105,9 @@ export const EMOTE_GUIDE = Object.freeze({
   HoshinaLaugh: 'Hoshina laughing; something genuinely funny, not every joke.'
 });
 export const GIF_GUIDE = Object.freeze({
+"gif_HinamiDownvote": {"url":"https://media.discordapp.net/attachments/1421035371860594769/1508312866946813972/Untitled_Artwork.gif?ex=6b08fad2&is=6b07a952&hm=303064c5382b5c6409ad454d21d76c9c6a9adb61e2d7425bf92335a21907a0e5&width=640&height=640","partner":false,"mood":"Hinami holding a large down arrow. Playful disapproval, a joking veto, or an unimpressed reaction to a silly opinion. Can be used with server members; not a personal attack."},
+"gif_BrickLove": {"url":"https://media.discordapp.net/attachments/1421035371860594769/1487899595823517798/IMG_5708.gif?ex=6b09343b&is=6b07e2bb&hm=1c256da13b46e30ce6b5b8f807c98f3352d4e3cedc717899ff97a6a77094ccb3","partner":true,"mood":"Fictional slapstick: Hinami throws a brick, Hoshina dodges, then pats her head when she is disappointed it missed. Fondly teasing her exaggerated cartoon antics; only clearly playful exchanges, never actual threats, injuries or arguments."},
+"gif_HikariPenggoleng": {"url":"https://media.discordapp.net/attachments/1542566379805216769/1572387639309504522/Untitled_Artwork.gif?ex=6b09645a&is=6b0812da&hm=78fe1ef99331cada176b49d6568c1bde71635dd5b4cc420595774c96b18be3a9","partner":false,"mood":"Hikari Hoshina, affectionately called Penggoleng, flapping her penguin wings. She is Hoshina and Hinami's daughter in their family continuity. Happy teasing, delight, celebration or proud family amusement. This GIF is also a familiar YumeServer reaction, allowed with other members."},
   "gif_HoshiYnaBonk": {
     "url": "https://cdn.discordapp.com/attachments/1421035371860594769/1476861054310154260/kaiju-no.gif",
     "partner": true,
@@ -142,20 +145,62 @@ export const GIF_GUIDE = Object.freeze({
   }
 });
 
+export const MEMORY_GUIDE = Object.freeze({
+  "mem_HinamiFaceDoodle": {
+    "url": "https://media.discordapp.net/attachments/1543229943159193630/1558402680668422285/IMG_1043.png?ex=6b094598&is=6b07f418&hm=ca176da3e494c7addb6ce3d8a1a23c63fc088727160a0924e9ab85b1f3eef7fe&format=webp&quality=lossless",
+    "partner": true,
+    "mood": "Fictional couple artwork: Hinami fell asleep on a bench and Hoshina grins for a selfie holding the marker he used to doodle on her face. Bring out as teasing evidence, a fond embarrassing memory or a surprise callback to her sleeping habits; not to humiliate her."
+  },
+  "mem_EatingConfession": {
+    "url": "https://media.discordapp.net/attachments/1543229943159193630/1558102646345437276/IMG_1036.png?ex=6b097fab&is=6b082e2b&hm=c8c0d6aa0e69dce2c5c569acf34719c6907260f87c42f5e74aa8c191265ba999&format=webp&quality=lossless",
+    "partner": true,
+    "mood": "Fictional couple artwork: Hinami is obliviously eating noodles with headphones on while Hoshina admits he might really love her. A fond callback to falling for her, confession banter, or a deliberate affectionate surprise."
+  },
+  "mem_WifeMeme": {
+    "url": "https://media.discordapp.net/attachments/1421035371860594769/1550812776367136768/IMG_0837.png?ex=6b095872&is=6b0806f2&hm=830a54414649b3dec895076d6399cc93d56d5d6b1678a17641e0f1de419828f7&format=webp&quality=lossless",
+    "partner": false,
+    "mood": "Edited fictional meme: Hoshina shows Kaiju No. 10 a photo of Hinami and declares she is his wife; No. 10 deadpans that it does not need this information. Proudly show her off, joke about their relationship or respond to a relevant wife/HoshiYna joke. Not a threat toward members or a response to serious conflict."
+  },
+  "mem_MorningLight": {
+    "url": "https://media.discordapp.net/attachments/1421035371860594769/1492610874114969761/Untitled_Artwork.png?ex=6b093473&is=6b07e2f3&hm=d464782f571b8e7e51ee870a58f06d4aa4f7f48b22f4234874943ddee3b5facf&format=webp&quality=lossless",
+    "partner": true,
+    "mood": "Fictional couple artwork: Hoshina and Hinami smiling close together under warm morning light and green bedding. Rare, quietly affectionate callback to a shared morning, a sweet moment or a deliberate romantic surprise, not an automatic comfort response."
+  }
+});
+const MEDIA_GUIDE={...GIF_GUIDE,...MEMORY_GUIDE};
+
 const emoteToken = /<a?:([A-Za-z0-9_]+):\d+>|:([A-Za-z0-9_]{2,}):/g;
 
-const gifUrls=new Map(Object.entries(GIF_GUIDE).map(([name,item])=>[item.url,name]));
-// Recognize the supplied links even if Discord adds temporary signed query parameters.
+// Match by attachment path, independent of signed queries and media/CDN hostname.
+const mediaKey=url=>String(url||'').split('?')[0].replace(/^https:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\/attachments\//i,'discord-attachment/');
+const gifUrls=new Map(Object.entries(MEDIA_GUIDE).map(([name,item])=>[mediaKey(item.url),name]));
 function gifAliases(value) {
-  return String(value||'').replace(/https:\/\/(?:cdn\.discordapp\.com\/attachments\/[0-9]+\/[0-9]+\/[A-Za-z0-9_.%-]+\.gif|gif\.fxtwitter\.com\/tweet_video\/[A-Za-z0-9_-]+\.gif)(?:\?[^\s<>"']*)?/gi,raw=>{
-    const name=gifUrls.get(raw.split('?')[0]);
+  return String(value||'').replace(/https:\/\/(?:(?:cdn\.discordapp\.com|media\.discordapp\.net)\/attachments\/[0-9]+\/[0-9]+\/[A-Za-z0-9_.%-]+\.(?:gif|png|webp|jpe?g)|gif\.fxtwitter\.com\/tweet_video\/[A-Za-z0-9_-]+\.gif)(?:\?[^\s<>"']*)?/gi,raw=>{
+    const name=gifUrls.get(mediaKey(raw));
     return name?':'+name+':':raw;
   });
+}
+export function availableMemories(context) {
+  const replies=(context.previous||[]).filter(row=>row.bot&&isFresh(row)&&!errorReply(String(row.text||'')));
+  // Separate rarity gate: no memory artwork in the last 24 bot replies,
+  // and no visual reaction on the immediately preceding bot reply.
+  if(replies.length<8||replies.slice(-24).some(row=>/:mem_[A-Za-z0-9_]+:/.test(gifAliases(row.text))))return {};
+  const last=String(replies.at(-1)?.text||'').trim();
+  if(withoutEmotes(gifAliases(last))!==last)return {};
+  const text=String(context.current?.text||'');
+  const serious=/\b(?:unsafe|threat|abuse|suicid\w*|self.harm|panic|trauma|injur\w*)\b/i.test(text);
+  if(serious)return {};
+  const wifeTopic=/\b(?:wife|husband|hoshiyna|hinami|marriage|married|ship|relationship|show her off|show me off)\b/i.test(text);
+  return Object.fromEntries(Object.entries(MEMORY_GUIDE).filter(([name,item])=>{
+    if(item.partner&&!context.isPartner)return false;
+    if(!context.isPartner&&name==='mem_WifeMeme'&&!wifeTopic)return false;
+    return true;
+  }).map(([name,item])=>[name,item.url]));
 }
 export function availableGifs(context) {
   return Object.fromEntries(Object.entries(GIF_GUIDE).filter(([name,item])=>{
     if(item.partner&&!context.isPartner)return false;
-    if(name==='gif_HoshiYnaBonk'){
+    if(name==='gif_HoshiYnaBonk'||name==='gif_BrickLove'){
       const text=String(context.current?.text||'');
       // A slapstick neck-grab must not be selected in a serious or threatening exchange.
       if(/\b(?:hurt|injur(?:y|ed)|scared|afraid|threat|kill|chok(?:e|ing)|strangl\w*|abuse|violence|serious|stop|unsafe|suicid\w*|self.harm|panic|crying|trauma)\b/i.test(text))return false;
@@ -172,15 +217,15 @@ export function availableEmotes(context) {
 }
 export function renderApprovedEmotes(value,context) {
   const eligible=allowEmotes(context);
-  const allowed=eligible?{...availableEmotes(context),...availableGifs(context)}:{};
+  const allowed={...(eligible?{...availableEmotes(context),...availableGifs(context)}:{}),...availableMemories(context)};
   let selected='',isGif=false;
   const placeholder='\uE000';
   // Never allow a model to supply an arbitrary GIF URL as a reaction.
-  const source=gifAliases(value).replace(/https?:\/\/[^\s<>"']+\.gif(?:\?[^\s<>"']*)?/gi,'');
+  const source=gifAliases(value).replace(/https?:\/\/[^\s<>"']+\.(?:gif|png|webp|jpe?g)(?:\?[^\s<>"']*)?/gi,'');
   const text=source.replace(/\uE000/g,'').replace(emoteToken,(_,actual,alias)=>{
     const name=actual||alias;
     if(!selected&&Object.hasOwn(allowed,name)){
-      selected=allowed[name];isGif=Object.hasOwn(GIF_GUIDE,name);return placeholder;
+      selected=allowed[name];isGif=Object.hasOwn(MEDIA_GUIDE,name);return placeholder;
     }
     return '';
   });
@@ -192,10 +237,17 @@ export function renderApprovedEmotes(value,context) {
   return plain.replace(placeholder,selected).trim();
 }
 export function emotePrompt(context) {
-  if(!allowEmotes(context))return 'For this reply, use plain text without emojis, GIFs or emoticons. Express tone through your wording.';
-  const available=availableEmotes(context),gifs=availableGifs(context);
-  return 'Plain text is normal. If a reaction genuinely fits, optionally select ONE server emote OR ONE GIF by typing its exact :name: alias. A GIF may stand alone or accompany a short natural message. Use a reaction only if it adds something; never force one. No raw GIF URLs, generic emojis, other emotes, or emoticons.\n'
-    +Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]).concat(Object.keys(gifs).map(name=>':'+name+': '+GIF_GUIDE[name].mood)).join('\n');
+  const eligible=allowEmotes(context);
+  const available=eligible?availableEmotes(context):{},gifs=eligible?availableGifs(context):{},memories=availableMemories(context);
+  if(!Object.keys(available).length&&!Object.keys(gifs).length&&!Object.keys(memories).length)
+    return 'For this reply, use plain text without emojis, GIFs, images or emoticons. Express tone through your wording.';
+  const rules=['Plain text is normal. Optionally choose at most ONE approved media alias for this message, never a raw URL.'];
+  if(eligible)rules.push('A server emote or reaction GIF may stand alone or accompany dialogue when genuinely fitting. Never force a reaction.',
+    ...Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]),
+    ...Object.keys(gifs).map(name=>':'+name+': '+GIF_GUIDE[name].mood));
+  if(Object.keys(memories).length)rules.push('Memory artwork is a rare deliberate share from your fictional shared history, NOT a normal reaction. Use only when it makes a specific conversational point, surprises Hinami affectionately, recalls the pictured moment, or proudly shows her off. Prefer a brief relevant caption in your own voice; never invent factual details about the image. Most replies should not contain artwork.',
+    ...Object.keys(memories).map(name=>':'+name+': '+MEMORY_GUIDE[name].mood));
+  return rules.join('\n');
 }
 
 
@@ -213,7 +265,7 @@ const INCOMING_EMOTES = Object.freeze({
   HikariHoshinaPenggolenbyMax: 'animated GIF of Penggoleng (meaning penguin), Hikari Hoshina, Hoshina and Hinami’s daughter, flapping her little penguin wings; a cute family reaction',
   HoshinaLaugh: 'laughter or amusement'
 });
-const incomingNames = new Map([...Object.entries(INCOMING_EMOTES),...Object.entries(GIF_GUIDE).map(([name,item])=>[name,item.mood])].map(([name,meaning])=>[name.toLowerCase(),meaning]));
+const incomingNames = new Map([...Object.entries(INCOMING_EMOTES),...Object.entries(MEDIA_GUIDE).map(([name,item])=>[name,item.mood])].map(([name,meaning])=>[name.toLowerCase(),meaning]));
 export function interpretIncoming(value) {
   return String(value||'').replace(emoteToken,(raw,actual,alias)=>{
     const name=actual||alias;
@@ -275,13 +327,13 @@ function incomingContext(context) {
   for(const value of values) {
     gifAliases(value).replace(emoteToken,(raw,actual,alias)=>{
       const name=actual||alias;
-      if(!context.isPartner&&(/^(?:t_hoshinya|hinamiheart|hikarihoshinapenggolenbymax)$/i.test(name)||GIF_GUIDE[name]?.partner))return raw;
+      if(!context.isPartner&&(/^(?:t_hoshinya|hinamiheart|hikarihoshinapenggolenbymax)$/i.test(name)||MEDIA_GUIDE[name]?.partner))return raw;
       const meaning=incomingNames.get(name.toLowerCase());
       if(meaning)names.add(name+' = '+meaning);
       return raw;
     });
   }
-  return names.size?'Current custom emoji meanings (background only, including reactions you sent earlier): '+[...names].join('; ')+'.':'';
+  return names.size?'Current custom emoji meanings (background only, including reactions and memory artwork you sent earlier): '+[...names].join('; ')+'.':'';
 }
 export function leakedOutput(value,system='') {
   const text=String(value||'');
