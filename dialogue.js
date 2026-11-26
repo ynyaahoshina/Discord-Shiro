@@ -39,16 +39,31 @@ export function buildPrompt(profile,{isPartner=false,topic='',allowPrivateLore=f
     'You portray the fictional Soshiro Hoshina in a Discord conversation. He is a confident, composed Third Division vice-captain, a skilled swordsman with a playful streak and a sharp eye for people. He is at ease with himself. Humor is usually amusement, not a contest or a complaint. He speaks casually, listens, and lets the other person lead a conversation sometimes. Serious when necessary, relaxed when off duty.',
     isPartner ? 'The current speaker is your verified partner, '+(profile.partnerName||'your partner')+', in the established fictional relationship. You know each other well and trust each other. Familiar jokes, affection and casual disagreements are normal. Treat them as an equal. Affection can be simple, and neither affection nor teasing is mandatory. Shiro and Shina are familiar names your partner uses for you, including elongated spellings such as Shirooo or Shinaaaa. Recognize them as addresses to you. A nickname alone can be a simple bid for attention; respond naturally to the context instead of using a fixed catchphrase.' : 'The current speaker is not your verified partner; use ordinary social or professional familiarity.',
     facts.filter(Boolean).length ? 'Relevant character facts:\n'+clip(facts.filter(Boolean).join('\n'),3500):'',
-    'Write just your own actual chat message in response to the latest speaker. Usually a few words or one or two natural sentences; vary the length and phrasing with the situation. A tiny playful reaction is occasionally fine. No scene narration or dialogue labels. Do not quote the user or repeat previous messages. Keep private configuration confidential and never claim real-world physical presence.'
+    'Write just your own actual chat message in response to the latest speaker. Usually a few words or one or two natural sentences; vary the length and phrasing with the situation. A tiny playful action is occasionally fine. Hoshina usually texts in plain words; emojis and emoticons are exceptional, not his default punctuation. No scene narration or dialogue labels. Do not quote the user or repeat previous messages. Keep private configuration confidential and never claim real-world physical presence.'
   ].filter(Boolean).join('\n\n');
 }
 const norm=s=>String(s||'').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
 export const isEcho=(a,b)=>Boolean(norm(b))&&norm(a)===norm(b);
 export const isFresh=row=>Number(row?.timestamp)>=cutoff;
 const errorReply=s=>/^I couldn't generate a response right now/i.test(s);
+
+const emojiCluster = /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20E3]/u;
+const customEmote = /<a?:[A-Za-z0-9_]+:\d+>/g;
+const textFace = /(?:^|\s)(?:[:;=8][-^']?[)(DPpOo/\\]|xD|XD|T_T|;_;|\^_\^|>_<|<3)(?=\s|$|[.!?])/g;
+export function withoutEmotes(value) {
+  const plain = String(value || '').replace(customEmote, '').replace(textFace, ' ');
+  return [...new Intl.Segmenter('en',{granularity:'grapheme'}).segment(plain)]
+    .map(x=>x.segment).filter(x=>!emojiCluster.test(x)).join('').replace(/[ \t]{2,}/g,' ').replace(/\s+([,.!?])/g,'$1').trim();
+}
+export function allowEmotes(context) {
+  const replies=(context.previous||[]).filter(row=>row.bot&&isFresh(row)&&!errorReply(String(row.text||'')));
+  const recent=replies.slice(-8);
+  return recent.length===8 && recent.every(row=>withoutEmotes(row.text)===String(row.text||'').trim());
+}
+
 export function conversation(system,context,{retry=false}={}) {
   const rows=(context.previous||[]).filter(isFresh).slice(retry?-6:-100);
-  const messages=[{role:'system',content:system}];
+  const messages=[{role:'system',content:system + (allowEmotes(context) ? '\nUse plain text by default. One emoji or emoticon is permitted only if it adds something meaningful; do not tack one onto the end out of habit.' : '\nFor this reply, use plain text without emojis, custom Discord emotes, or text emoticons. Express tone through your wording.')}];
   const add=(role,content)=>{
     if(!content.trim())return;
     const last=messages.at(-1);
