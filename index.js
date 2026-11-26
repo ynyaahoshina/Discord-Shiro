@@ -23,8 +23,10 @@ let busy = false, day = '', used = 0;
 const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
 const record = m => ({ author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(m.cleanContent) });
 const configuredModel = env.CHAT_MODEL?.trim();
-const model = configuredModel || 'nvidia/nemotron-3.5-lightning-30b-a3b';
-console.log('[CONFIG] revision=nemotron-default-v1 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Nemotron default)'));
+const retiredModel = configuredModel === 'qwen/qwen3.5-397b-a17b';
+const model = retiredModel || !configuredModel ? 'nvidia/nemotron-3.5-lightning-30b-a3b' : configuredModel;
+if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Nemotron Lightning');
+console.log('[CONFIG] revision=nemotron-override-v2 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Nemotron default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
