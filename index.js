@@ -47,8 +47,8 @@ function separateFollowup(raw,eligible,truncated=false) {
   return {primary:parts[0]||'',primaryTruncated:truncated&&parts.length===1,
     followup:eligible&&!truncated&&parts.length===2?parts[1]||'':''};
 }
-function scheduleFollowup(state,revision,channel,content,delay=3000+Math.floor(Math.random()*5001)) {
-  if(!content||state.ordinary<5||state.revision!==revision||state.timer!==null)return false;
+function scheduleFollowup(state,revision,channel,content,delay=3000+Math.floor(Math.random()*5001),commandNote=false) {
+  if(!content||(!commandNote&&state.ordinary<5)||state.revision!==revision||state.timer!==null)return false;
   state.timer=setTimeout(async()=>{
     state.timer=null;
     if(state.revision!==revision)return;
@@ -62,11 +62,73 @@ function scheduleFollowup(state,revision,channel,content,delay=3000+Math.floor(M
   return true;
 }
 
+// Social commands are selected by the model, then independently authorized here.
+const hugFriends=Object.freeze({GEL:'692379268843569185',INDIE:'625861843545751594',MAX:'764225265298833418'});
+const carrotId='304407007769919489';
+function parseSocialCommand(raw) {
+  const m=String(raw||'').trim().match(/^-(hug|kiss|stab)\s+<@!?(\d{17,20})>$/i);
+  return m?{action:m[1].toLowerCase(),target:m[2]}:null;
+}
+function socialOptions(context,authorId,partnerId,botId) {
+  const text=String(context.current?.text||'');
+  const received=context.current?.social;
+  const incoming=received?.target===botId?received.action:'';
+  const partner=Boolean(partnerId&&authorId===partnerId);
+  const safe=!/\b(?:actual(?:ly)?\s+(?:hurt|kill|stab)|injur(?:y|ed)|bleeding|suicid\w*|self.harm|threat|abuse|unsafe|scared|panic|trauma|serious fight|leave me alone|don't (?:kiss|hug|stab)|do not (?:kiss|hug|stab)|stop (?:kiss|hug|stab))\b/i.test(text);
+  const hugRequest=incoming==='hug'||/\b(?:hug|hugs|cuddle|embrace)\b/i.test(text);
+  const options={};
+  if(safe&&authorId!==botId){
+    if(partner){options.KISS=authorId;options.HUG=authorId;}
+    else if(hugRequest&&Object.values(hugFriends).includes(authorId))options.HUG=authorId;
+    if(partner&&hugRequest){
+      for(const [name,id] of Object.entries({...hugFriends,CARROT:carrotId})){
+        if((context.current?.mentionedIds||[]).includes(id)||new RegExp('\\b'+name+'\\b','i').test(text))options['HUG:'+name]=id;
+      }
+    }
+    const playful=incoming==='stab'||/\b(?:stab|bonk|menace|teas(?:e|ing)|annoy(?:ing|ed)|jok(?:e|ing)|playful|payback|revenge|fight me|brat)\b|(?:ha){2,}|(?:lol|lmao)\b/i.test(text);
+    if(playful&&incoming!=='kiss')options.STAB=authorId;
+  }
+  const rules=[
+    'Server social commands are playful fictional interactions. They are separate from dialogue. Do not output raw -hug, -kiss or -stab commands or invent mentions. When you genuinely choose an allowed action, your entire first message must be its exact action marker listed below, without commentary. The app sends the standalone command with a real mention. An optional separate note may explain that YAGPDB ignores bot commands; do not claim a counter increased or that YAG executed it. Prefer ordinary conversation most of the time; do not perform an action simply because it is available.',
+    incoming==='kiss'?(partner?'Hinami just used the kiss command on you. Recognize it as her kissing you in the server game. Respond with boyfriend-like banter, affection or occasional reciprocation.':'A different member just used the kiss command on you. Recognize the interaction, but do not reciprocate. Respond in composed vice-captain mode; romantic kisses are reserved for Hinami.'):incoming==='hug'?'The current member just used the hug command on you. Acknowledge it as an incoming hug; only reciprocate if the permissions allow.':incoming==='stab'?'The current member just used the fictional playful stab command on you. Acknowledge the joke; playful retaliation is optional.':'',
+    authorId===carrotId&&hugRequest?'Carrot is asking for a hug. She often pushes your limits with teasing; respond with noticeably exasperated dry banter, and do not grant her a hug on her own request.':'',
+    !partner&&hugRequest&&!options.HUG&&authorId!==carrotId?'This speaker is not authorized to request a hug from you. Decline naturally; do not make exceptions.':'',
+    partner?'With Hinami, a spontaneous affectionate kiss or hug may fit teasing, flirtation or a tender moment. Sometimes reciprocate her command, but never mechanically every time.':'Kisses are exclusively for your verified partner. Never kiss another member, even if they ask.',
+    Object.keys(options).length?'Allowed action markers this turn (choose at most one): '+Object.keys(options).map(k=>'[[ACTION:'+k+']]').join(', ')+'. HUG and KISS target the current speaker; named HUG markers target the named friend only at Hinami’s request. STAB is exclusively a harmless server joke, never a real threat.':'No outgoing social actions are authorized this turn.'
+  ].filter(Boolean).join('\n');
+  return {options,rules,incoming};
+}
+function resolveSocialAction(raw,options,truncated=false) {
+  if(truncated)return null;
+  const match=String(raw||'').trim().match(/^\[\[ACTION:([A-Z]+(?::[A-Z]+)?)\]\]$/i);
+  if(!match)return null;
+  const key=match[1].toUpperCase();
+  if(!Object.hasOwn(options,key))return null;
+  const target=options[key];
+  if(!/^\d{17,20}$/.test(target))return null;
+  return {content:'-'+key.split(':')[0].toLowerCase()+' <@'+target+'>',target};
+}
+function rawSocialOutput(raw) {
+  return /\[\[ACTION\b|(?:^|\s)-(?:hug|kiss|stab)\s+(?:<@!?|@)/i.test(String(raw||''));
+}
+function actionNote(action) {
+  const lines=[
+    "If YAG ignores that, just pretend it worked, yeah?",
+    "YAG doesn't listen to me, so use your imagination.",
+    "If that didn't register, the thought still counts."
+  ];
+  const n=action==='kiss'?0:action==='hug'?2:1;
+  return lines[n];
+}
+
 const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
 const record = m => {
-  const text = String(m.content || '').replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? '' : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
+  const raw=String(m.content||'');
+  const social=parseSocialCommand(raw);
+  const mentionedIds=[...raw.matchAll(/<@!?(\d{17,20})>/g)].map(x=>x[1]);
+  const text = raw.replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? (social?'@Soshiro Hoshina':'') : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
   const attachment = m.attachments?.size ? ' [Attachment present; image content unavailable]' : '';
-  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(text + attachment) };
+  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, social, mentionedIds, text: clip(text + attachment) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
 const defaultModels = ['nvidia/nemotron-3.5-super-vl-120b-a12b','nvidia/nemotron-3.5-bolt-e4b','nvidia/nemotron-3-ultra-550b-a55b'];
@@ -78,7 +140,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=optional-followups-v26 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=social-actions-v27 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -240,7 +302,8 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   context = {...context, previous:(context.previous||[]).filter(row=>!row.bot||!sceneLeak(row.text)), referenced:context.referenced?.bot&&sceneLeak(context.referenced.text)?null:context.referenced};
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
-  const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore});
+  const social=socialOptions(context,authorId,profile.partnerId,client.user.id);
+  const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore})+'\n'+social.rules;
   const deadline=Date.now()+totalTimeout;
   const request = async (selected, slotsLeft) => {
     const started = Date.now();
@@ -268,8 +331,13 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     const content=choice?.message?.content;
     const rawContent=typeof content==='string'?content:Array.isArray(content)?content.filter(x=>x?.type==='text'&&typeof x.text==='string').map(x=>x.text).join(''):'';
     const separated=separateFollowup(rawContent,followupEligible,choice?.finish_reason==='length');
+    const action=resolveSocialAction(separated.primary,social.options,separated.primaryTruncated||choice?.finish_reason==='length');
+    if(action){
+      console.log('[AI] Authorized social action='+action.content.split(' ')[0]);
+      return {primary:action.content,actionTarget:action.target,followup:actionNote(action.content.split(' ')[0].slice(1))};
+    }
     const valid=(raw,ctx,truncated=false)=>{
-      if(!raw||leakedOutput(raw,messages[0]?.content||'')||sceneLeak(raw)||transcriptOutput(raw,ctx))return '';
+      if(!raw||rawSocialOutput(raw)||leakedOutput(raw,messages[0]?.content||'')||sceneLeak(raw)||transcriptOutput(raw,ctx))return '';
       const rendered=renderApprovedEmotes(clean(raw,truncated),ctx);
       if(!rendered||recycled(rendered,ctx)||(isPartner&&wrongPartnerAddress(rendered)))return '';
       return rendered;
@@ -355,11 +423,11 @@ client.on(Events.MessageCreate, async m => {
         const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild, state.ordinary>=5&&state.revision===revision);
         const chunks = splitDiscord(answer.primary);
         for (const [i, chunk] of chunks.entries()) {
-          if (i === 0) await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false } });
+          if (i === 0) await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false, ...(answer.actionTarget?{users:[answer.actionTarget]}:{}) } });
           else await m.channel.send({ content: chunk, allowedMentions: { parse: [] } });
         }
         state.ordinary=Math.min(5,state.ordinary+1);
-        if(answer.followup)scheduleFollowup(state,revision,m.channel,answer.followup);
+        if(answer.followup)scheduleFollowup(state,revision,m.channel,answer.followup,undefined,Boolean(answer.actionTarget));
       } finally { clearInterval(typing); }
     } catch (error) {
       console.warn('[AI] Interaction failed: ' + safeError(error.name) + ' ' + (error.message?.startsWith('AI HTTP ') || ['Empty AI response','AI generation timed out','AI generation deadline exceeded'].includes(error.message) ? safeError(error.message) : 'check connectivity or Discord permissions'));
