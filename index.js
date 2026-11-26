@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import { readFile } from 'node:fs/promises';
-import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput } from './dialogue.js';
+import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress } from './dialogue.js';
 
 const env = process.env;
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
@@ -37,7 +37,7 @@ const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 const model = retiredModel || !configuredModel ? defaultModel : configuredModel;
 let activeModel = model;
 if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Gemma');
-console.log('[CONFIG] revision=dialogue-guard-v17 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
+console.log('[CONFIG] revision=nickname-direction-v18 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -171,7 +171,7 @@ async function generate(context, authorId, channelId, guild) {
     const rawCleaned=clean(rawContent,choice?.finish_reason==='length');
     const cleaned=renderApprovedEmotes(rawCleaned,context);
     const repeat=Boolean(cleaned&&recycled(cleaned,context));
-    const wrongAddress=Boolean(isPartner&&/\bhomie\b/i.test(cleaned)&&!/\bhomie\b/i.test(context.current?.text||''));
+    const wrongAddress=Boolean(isPartner&&wrongPartnerAddress(cleaned));
     if(wrongAddress)console.warn('[AI] Rejected inappropriate partner address');
     console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' visibleChars='+cleaned.length+' recycled='+repeat);
     return cleaned&&!repeat&&!wrongAddress?cleaned:'';
