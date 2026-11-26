@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import { readFile } from 'node:fs/promises';
-import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress } from './dialogue.js';
+import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput } from './dialogue.js';
 
 const env = process.env;
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
@@ -28,7 +28,7 @@ const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
 const record = m => {
   const text = String(m.content || '').replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? '' : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
   const attachment = m.attachments?.size ? ' [Attachment present; image content unavailable]' : '';
-  return { id: m.id, timestamp: m.createdTimestamp, author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(text + attachment) };
+  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(text + attachment) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
 const retiredModel = configuredModel === 'qwen/qwen3.5-397b-a17b';
@@ -37,7 +37,7 @@ const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 const model = retiredModel || !configuredModel ? defaultModel : configuredModel;
 let activeModel = model;
 if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Gemma');
-console.log('[CONFIG] revision=nickname-direction-v18 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
+console.log('[CONFIG] revision=thread-context-v19 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -92,7 +92,7 @@ async function readThreadHistory(message) {
   const started = Date.now();
   const batch = await message.channel.messages.fetch({ limit: 100, before: message.id, cache: false });
   const previous = [...batch.values()]
-    .filter(item => !item.webhookId && (!item.author.bot || item.author.id === client.user.id))
+    .filter(item => !item.system && !item.webhookId && (!item.author.bot || item.author.id === client.user.id))
     .sort((a,b) => BigInt(a.id) < BigInt(b.id) ? -1 : 1)
     .map(record);
   console.log('[MEMORY] Retrieved=' + previous.length + ' fresh=' + previous.filter(isFresh).length + ' elapsedMs=' + (Date.now() - started));
@@ -166,6 +166,10 @@ async function generate(context, authorId, channelId, guild) {
     const rawContent=typeof choice?.message?.content==='string'?choice.message.content:'';
     if(leakedOutput(rawContent,messages[0]?.content||'')){
       console.warn('[AI] Rejected internal-instruction output; model='+selected);
+      return '';
+    }
+    if(transcriptOutput(rawContent,context)){
+      console.warn('[AI] Rejected transcript-like or unrelated technical output; model='+selected);
       return '';
     }
     const rawCleaned=clean(rawContent,choice?.finish_reason==='length');
