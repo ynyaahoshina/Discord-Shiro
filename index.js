@@ -31,15 +31,13 @@ const record = m => {
   return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(text + attachment) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
-const retiredModels = new Set(['qwen/qwen3.5-397b-a17b','google/gemma-4-31b-it']);
-const defaultModel = 'meta/muse-glimmer-30b';
-const fallbackModel = 'z-ai/glm-5.3-flash';
-// Legacy conversational selections are intentionally superseded by the new default.
-const legacyChatModels = new Set(['mistralai/mistral-large-4-1t-a52b','nvidia/nemotron-3.5-lightning-30b-a3b']);
-const model = !configuredModel || retiredModels.has(configuredModel) || legacyChatModels.has(configuredModel) ? defaultModel : configuredModel;
-let activeModel = model;
-if(retiredModels.has(configuredModel)||legacyChatModels.has(configuredModel)) console.warn('[CONFIG] Ignoring retired or superseded chat model; using Muse Glimmer');
-console.log('[CONFIG] revision=muse-chat-v23 selectedModel='+safeModel(model));
+const retiredModels = new Set(['qwen/qwen3.5-397b-a17b','google/gemma-4-31b-it','meta/muse-glimmer-30b']);
+const defaultModel = 'z-ai/glm-5.3-flash';
+const model = !configuredModel || retiredModels.has(configuredModel) ? defaultModel : configuredModel;
+const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 25000, 90000);
+const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 35000, 120000);
+if(retiredModels.has(configuredModel)) console.warn('[CONFIG] Ignoring retired model; using GLM Flash');
+console.log('[CONFIG] revision=glm-stream-v24 selectedModel='+safeModel(model)+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -149,6 +147,45 @@ function barePingReply(context) {
   const n=Number(id.slice(-4));
   return choices[Number.isFinite(n)?n%choices.length:0];
 }
+// Collect streamed visible text only. Never send or store reasoning content.
+async function readCompletion(response, started, selected) {
+  if(!response.headers?.get('content-type')?.includes('text/event-stream')) return response.json();
+  if(!response.body)throw new Error('AI stream body missing');
+  const reader=response.body.getReader();
+  const decoder=new TextDecoder();
+  let buffer='',content='',reasoning=false,finish=null,usage,first=false,doneEvent=false;
+  function line(raw){
+    if(!raw.startsWith('data:'))return;
+    const payload=raw.slice(5).trim();
+    if(payload==='[DONE]'){doneEvent=true;return;}
+    if(!payload)return;
+    let packet;try{packet=JSON.parse(payload)}catch{throw new Error('Invalid AI stream event')}
+    if(packet.error)throw new Error('AI stream error');
+    if(packet.usage)usage=packet.usage;
+    const c=packet.choices?.[0],delta=c?.delta||{};
+    if(!first&&(delta.reasoning_content||delta.reasoning||delta.content)){
+      first=true;console.log('[AI] First generated token model='+selected+' elapsedMs='+(Date.now()-started));
+    }
+    if(delta.reasoning_content||delta.reasoning)reasoning=true;
+    const part=typeof delta.content==='string'?delta.content:Array.isArray(delta.content)?delta.content.filter(x=>x?.type==='text'&&typeof x.text==='string').map(x=>x.text).join(''):'';
+    if(part&&!content)console.log('[AI] First visible text model='+selected+' elapsedMs='+(Date.now()-started));
+    content+=part;
+    if(c?.finish_reason)finish=c.finish_reason;
+  }
+  try{
+    while(!doneEvent){
+      const chunk=await reader.read();
+      if(chunk.done){buffer+=decoder.decode();break;}
+      buffer+=decoder.decode(chunk.value,{stream:true});
+      const lines=buffer.split(/\r?\n/);buffer=lines.pop()||'';
+      for(const item of lines){line(item);if(doneEvent)break;}
+    }
+    if(buffer.trim()&&!doneEvent)line(buffer);
+    if(!doneEvent&&!finish)throw new Error('AI stream ended without completion');
+    return {choices:[{message:{content,reasoning_content:reasoning?true:undefined},finish_reason:finish||'stop'}],usage};
+  }finally{try{await reader.cancel()}catch{}}
+}
+
 async function generate(context, authorId, channelId, guild) {
   const acknowledgment=barePingReply(context);
   if(acknowledgment!==null){
@@ -163,20 +200,21 @@ async function generate(context, authorId, channelId, guild) {
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
   const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore});
+  const deadline=Date.now()+totalTimeout;
   const request = async (selected, retry=false) => {
     const started = Date.now();
+    const remaining=Math.min(requestTimeout,deadline-started);
+    if(remaining<=0)throw new Error('AI generation deadline exceeded');
     const messages = conversation(system, context, {retry});
-    const options = selected === defaultModel
-      ? {chat_template_kwargs:{reasoning_strength:'low'},top_p:0.95}
-      : selected === fallbackModel
-      ? {reasoning_effort:'low',chat_template_kwargs:{clear_thinking:true}}
+    const options = selected === 'z-ai/glm-5.3-flash'
+      ? {reasoning_effort:'low',chat_template_kwargs:{reasoning_effort:'low',clear_thinking:true}}
       : {};
     console.log('[AI] Request model=' + selected + ' retry=' + retry + ' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     const response = await fetch(endpoint, {
       method:'POST',
-      headers:{Authorization:'Bearer '+env.NVIDIA_API_KEY,'Content-Type':'application/json'},
-      body:JSON.stringify({model:selected,messages,max_tokens:outputBudget,temperature:0.8,stream:false,...options}),
-      signal:AbortSignal.timeout(90000)
+      headers:{Authorization:'Bearer '+env.NVIDIA_API_KEY,'Content-Type':'application/json','Accept':'text/event-stream'},
+      body:JSON.stringify({model:selected,messages,max_tokens:outputBudget,temperature:0.7,stream:true,...options}),
+      signal:AbortSignal.timeout(remaining)
     });
     if(!response.ok){
       const body=await response.text();
@@ -185,7 +223,8 @@ async function generate(context, authorId, channelId, guild) {
       console.warn('[AI] HTTP '+response.status+' model='+selected+' detail='+safeError(typeof detail==='string'?detail:JSON.stringify(detail)));
       const error=new Error('AI HTTP '+response.status);error.status=response.status;throw error;
     }
-    const data=await response.json();
+    console.log('[AI] Response headers model='+selected+' elapsedMs='+(Date.now()-started));
+    const data=await readCompletion(response,started,selected);
     const choice=data.choices?.[0];
     const content=choice?.message?.content;
     const rawContent=typeof content==='string'?content:Array.isArray(content)?content.filter(x=>x?.type==='text'&&typeof x.text==='string').map(x=>x.text).join(''):'';
@@ -205,42 +244,20 @@ async function generate(context, authorId, channelId, guild) {
     console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' reasoning_present='+Boolean(choice?.message?.reasoning_content)+' completionTokens='+(data.usage?.completion_tokens??'unknown')+' visibleChars='+cleaned.length+' recycled='+repeat);
     return cleaned&&!repeat&&!wrongAddress?cleaned:'';
   };
-  let selected=activeModel;
-  let calls=0;
-  const unavailable=error=>[403,404,410,503].includes(error?.status);
-  // Availability failures do not consume the next model's first quality attempt.
-  // At most three API calls per Discord interaction; never retry rate limits.
-  while(calls<3){
-    let answer='';
+  for(let attempt=0;attempt<2;attempt++){
     try{
-      calls++;
-      answer=await request(selected,false);
+      const answer=await request(model,attempt>0);
       if(answer)return answer;
     }catch(error){
-      if(unavailable(error)&&selected!==fallbackModel){
-        console.warn('[AI] Primary unavailable; switching to GLM Flash until next restart');
-        selected=fallbackModel;activeModel=selected;continue;
+      if(error.name==='TimeoutError'||error.name==='AbortError'){
+        console.warn('[AI] Generation timed out model='+model+'; no automatic timeout retry');
+        throw new Error('AI generation timed out');
       }
-      if(error.status!==400)throw error;
+      console.warn('[AI] Generation request failed model='+model+' type='+safeError(error.name)+' detail='+safeError(error.message));
+      throw error;
     }
-    if(calls<3){
-      console.warn('[AI] Retrying same model with compact context');
-      try{
-        calls++;
-        answer=await request(selected,true);
-        if(answer)return answer;
-      }catch(error){
-        if(unavailable(error)&&selected!==fallbackModel){
-          selected=fallbackModel;activeModel=selected;continue;
-        }
-        if(error.status!==400)throw error;
-      }
-    }
-    if(selected!==fallbackModel&&calls<3){
-      console.warn('[AI] Primary output unusable; trying fallback for this interaction');
-      selected=fallbackModel;continue;
-    }
-    break;
+    if(deadline-Date.now()<5000)break;
+    if(attempt===0)console.warn('[AI] Retrying rejected output once with compact context');
   }
   throw new Error('Empty AI response');
 }
@@ -287,7 +304,7 @@ client.on(Events.MessageCreate, async m => {
         }
       } finally { clearInterval(typing); }
     } catch (error) {
-      console.warn('[AI] Interaction failed: ' + safeError(error.name) + ' ' + (error.message?.startsWith('AI HTTP ') || error.message === 'Empty AI response' ? safeError(error.message) : 'check connectivity or Discord permissions'));
+      console.warn('[AI] Interaction failed: ' + safeError(error.name) + ' ' + (error.message?.startsWith('AI HTTP ') || ['Empty AI response','AI generation timed out','AI generation deadline exceeded'].includes(error.message) ? safeError(error.message) : 'check connectivity or Discord permissions'));
       await m.reply({ content: 'I couldn\'t generate a response right now. Please try again shortly.', allowedMentions: { parse: [], repliedUser: false } }).catch(() => console.warn('[Discord] Failed to send error reply'));
     } finally { busy = false; }
   } catch (error) {
