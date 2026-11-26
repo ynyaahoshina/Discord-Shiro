@@ -31,13 +31,13 @@ const record = m => {
   return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(text + attachment) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
-const retiredModel = configuredModel === 'qwen/qwen3.5-397b-a17b';
-const defaultModel = 'google/gemma-4-31b-it';
+const retiredModels = new Set(['qwen/qwen3.5-397b-a17b','google/gemma-4-31b-it']);
+const defaultModel = 'mistralai/mistral-large-4-1t-a52b';
 const fallbackModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
-const model = retiredModel || !configuredModel ? defaultModel : configuredModel;
+const model = !configuredModel || retiredModels.has(configuredModel) ? defaultModel : configuredModel;
 let activeModel = model;
-if (retiredModel) console.warn('[CONFIG] Ignoring retired Qwen configuration; using Gemma');
-console.log('[CONFIG] revision=ping-and-dialogue-v21 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Gemma default)'));
+if(retiredModels.has(configuredModel)) console.warn('[CONFIG] Ignoring retired model; using current default');
+console.log('[CONFIG] revision=model-routing-v22 selectedModel='+safeModel(model));
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
@@ -167,12 +167,12 @@ async function generate(context, authorId, channelId, guild) {
     const options = selected === fallbackModel ? {
       chat_template_kwargs: {enable_thinking: !retry},
       ...(!retry ? {reasoning_budget: 128} : {})
-    } : selected === defaultModel ? {chat_template_kwargs:{enable_thinking:false}} : {};
+    } : selected === 'mistralai/mistral-large-4-1t-a52b' ? {reasoning_effort:'low'} : {};
     console.log('[AI] Request model=' + selected + ' retry=' + retry + ' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     const response = await fetch(endpoint, {
       method:'POST',
       headers:{Authorization:'Bearer '+env.NVIDIA_API_KEY,'Content-Type':'application/json'},
-      body:JSON.stringify({model:selected,messages,max_tokens:outputBudget,temperature:0.85,stream:false,...options}),
+      body:JSON.stringify({model:selected,messages,max_tokens:outputBudget,temperature:0.7,stream:false,...options}),
       signal:AbortSignal.timeout(90000)
     });
     if(!response.ok){
@@ -184,7 +184,8 @@ async function generate(context, authorId, channelId, guild) {
     }
     const data=await response.json();
     const choice=data.choices?.[0];
-    const rawContent=typeof choice?.message?.content==='string'?choice.message.content:'';
+    const content=choice?.message?.content;
+    const rawContent=typeof content==='string'?content:Array.isArray(content)?content.filter(x=>x?.type==='text'&&typeof x.text==='string').map(x=>x.text).join(''):'';
     if(leakedOutput(rawContent,messages[0]?.content||'')){
       console.warn('[AI] Rejected internal-instruction output; model='+selected);
       return '';
@@ -201,21 +202,44 @@ async function generate(context, authorId, channelId, guild) {
     console.log('[AI] Response model='+selected+' elapsedMs='+(Date.now()-started)+' finish_reason='+safeError(choice?.finish_reason)+' visibleChars='+cleaned.length+' recycled='+repeat);
     return cleaned&&!repeat&&!wrongAddress?cleaned:'';
   };
-  let answer='';
   let selected=activeModel;
-  try{answer=await request(selected);}
-  catch(error){
-    if(selected===defaultModel&&[400,403,404,410].includes(error.status)){
-      console.warn('[AI] Gemma unavailable for this account/request; using Nemotron fallback until next restart');
-      selected=fallbackModel;activeModel=selected;
-    }else if(!(selected===fallbackModel&&error.status===400))throw error;
+  let calls=0;
+  const unavailable=error=>[403,404,410].includes(error?.status);
+  // Availability failures do not consume the next model's first quality attempt.
+  // At most three API calls per Discord interaction; never retry rate limits.
+  while(calls<3){
+    let answer='';
+    try{
+      calls++;
+      answer=await request(selected,false);
+      if(answer)return answer;
+    }catch(error){
+      if(unavailable(error)&&selected!==fallbackModel){
+        console.warn('[AI] Primary unavailable; switching to Nemotron until next restart');
+        selected=fallbackModel;activeModel=selected;continue;
+      }
+      if(error.status!==400)throw error;
+    }
+    if(calls<3){
+      console.warn('[AI] Retrying same model with compact context');
+      try{
+        calls++;
+        answer=await request(selected,true);
+        if(answer)return answer;
+      }catch(error){
+        if(unavailable(error)&&selected!==fallbackModel){
+          selected=fallbackModel;activeModel=selected;continue;
+        }
+        if(error.status!==400)throw error;
+      }
+    }
+    if(selected!==fallbackModel&&calls<3){
+      console.warn('[AI] Primary output unusable; trying fallback for this interaction');
+      selected=fallbackModel;continue;
+    }
+    break;
   }
-  if(!answer){
-    console.warn('[AI] Retrying once with compact fresh context');
-    answer=await request(selected,true);
-  }
-  if(!answer)throw new Error('Empty AI response');
-  return answer;
+  throw new Error('Empty AI response');
 }
 client.once(Events.ClientReady, c => {
   console.log('Online as ' + c.user.tag);
