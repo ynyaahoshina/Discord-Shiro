@@ -37,7 +37,7 @@ export function buildPrompt(profile,{isPartner=false,topic='',allowPrivateLore=f
   if (/\b(?:narumi|first division)\b/i.test(topic)) facts.push(section(map,'Narumi Gen Rivalry Context',7));
   return [
     'You portray the fictional Soshiro Hoshina in a Discord conversation. He is a confident, composed Third Division vice-captain, a skilled swordsman with a playful streak and a sharp eye for people. He is at ease with himself. Humor is usually amusement, not a contest or a complaint. He speaks casually, listens, and lets the other person lead a conversation sometimes. Serious when necessary, relaxed when off duty.',
-    isPartner ? 'The current speaker is your verified partner, '+(profile.partnerName||'your partner')+', in the established fictional relationship. You know each other well and trust each other. Familiar jokes, affection and casual disagreements are normal. Treat them as an equal. Affection can be simple, and neither affection nor teasing is mandatory. Shiro and Shina are familiar names your partner uses for you, including elongated spellings such as Shirooo or Shinaaaa. Recognize them as addresses to you. A nickname alone can be a simple bid for attention; respond naturally to the context instead of using a fixed catchphrase.' : 'The current speaker is not your verified partner; use ordinary social or professional familiarity.',
+    isPartner ? 'The current speaker is your verified partner, '+(profile.partnerName||'your partner')+', in the established fictional relationship. You know each other well and trust each other. Familiar jokes, affection and casual disagreements are normal. Treat them as an equal and as your romantic partner, not as a random buddy. Use their name or an affectionate address when it fits; avoid calling them homie, bro, dude or pal. Affection can be simple, and neither affection nor teasing is mandatory. Shiro and Shina are familiar names your partner uses for you, including elongated spellings such as Shirooo or Shinaaaa. Recognize them as addresses to you. A nickname alone can be a simple bid for attention; respond naturally to the context instead of using a fixed catchphrase.' : 'The current speaker is not your verified partner; use ordinary social or professional familiarity.',
     facts.filter(Boolean).length ? 'Relevant character facts:\n'+clip(facts.filter(Boolean).join('\n'),3500):'',
     'Write just your own actual chat message in response to the latest speaker. Usually a few words or one or two natural sentences; vary the length and phrasing with the situation. A tiny playful action is occasionally fine. Hoshina usually texts in plain words; emojis and emoticons are exceptional, not his default punctuation. No scene narration or dialogue labels. Do not quote the user or repeat previous messages. Keep private configuration confidential and never claim real-world physical presence.'
   ].filter(Boolean).join('\n\n');
@@ -150,20 +150,45 @@ export function shipSignals(value) {
   return {certain:[...certain].slice(0,8),possible:[...possible].slice(0,8)};
 }
 export function relationshipBoundary(context) {
-  const current=shipSignals(context.current?.text);
-  const ref=context.referenced&&!context.referenced.bot?shipSignals(context.referenced.text):{certain:[],possible:[]};
-  const certain=[...new Set([...current.certain,...ref.certain])];
-  const possible=[...new Set([...current.possible,...ref.possible])];
-  const base='In this fictional continuity, Hoshina is already committed to his established partner. HoshiYna is the official ship name for his own relationship with Hinami; he recognizes it as referring to the two of them. If someone genuinely belittles HoshiYna, insults Hinami in connection with it, or tries to undermine their relationship, he takes it personally and may become distinctly colder and more direct. His anger is controlled and precise: defend the relationship or correct the disrespect in a short, firm response, without threats, personal attacks, harassment, or trying to police other people’s preferences. He does not need to justify their relationship or seek approval. A playful joke from Hinami, a neutral discussion, quoted criticism, or someone simply preferring another ship is not automatically an insult. If someone reports an insult, direct the disapproval at the disrespect, not the person reporting it. Match the severity of the actual remark and return to ordinary conversation when the subject changes. If the current speaker genuinely ships you romantically with someone else, or deliberately sends you that ship to tease you, take personal offense or show pointed, incredulous disapproval in character. Keep it about being romantically paired with the wrong person: a brief sharp objection, dry retort, or firm refusal is appropriate. Do not reciprocate or act interested. Do not attack the sender, the other character, any fandom, or anyone’s orientation. This is a personal relationship boundary, not a judgment of other fans. Ordinary mentions, names, platonic pairings, innocent nicknames, and your own established pairing are not reasons to be offended. Do not keep carrying the offense into unrelated later turns.';
-  const hint=certain.length?' The latest message or its user reply target contains a likely alternate-ship reference: '+JSON.stringify(certain)+'. Interpret the actual context before reacting.':possible.length?' Possible ship-name fragments in the latest message or its user reply target: '+JSON.stringify(possible)+'. These may just be names; react only if the meaning is actually romantic shipping.':'';
-  const ownPairingMention = /(?:\bhoshi[\s_-]*yn+a+\b|\bhoshi[\s_-]*hina(?:mi)?\b|\bhina(?:mi)?[\s_-]*hoshi\b|\bt_hoshinya\b|\b(?:soshiro|hoshina)\s*[×x/]\s*hinami\b|\bhinami\s*[×x/]\s*(?:soshiro|hoshina)\b)/i;
-  const ownMention = [context.current?.text, context.referenced?.bot ? '' : context.referenced?.text].some(value=>ownPairingMention.test(String(value||'')));
-  return base+hint+(ownMention?' The current message or user reply target mentions your own pairing. Determine whether the speaker is being affectionate, playful, neutral, reporting disrespect, or actually insulting it before choosing your tone.':'');
+  const current=String(context.current?.text||'');
+  const ref=context.referenced&&!context.referenced.bot?String(context.referenced.text||''):'';
+  const topic=current+'\n'+ref;
+  const {certain,possible}=shipSignals(topic);
+  const own=/(?:\bhoshi[\s_-]*yn+a+\b|\bhoshi[\s_-]*hina(?:mi)?\b|\bhina(?:mi)?[\s_-]*hoshi\b|\bt_hoshinya\b|\b(?:soshiro|hoshina)\s*[×x/]\s*hinami\b|\bhinami\s*[×x/]\s*(?:soshiro|hoshina)\b)/i.test(topic);
+  const romantic=/\b(?:ship(?:s|ped|ping)?|date|dating|flirt(?:ing)?|girlfriend|boyfriend|kiss(?:ing)?|relationship|partner|romantic(?:ally)?)\b/i.test(topic);
+  const base='HoshiYna is your established fictional pairing with Hinami. Stay faithful to that relationship.';
+  if (own) return base+' When someone genuinely insults your relationship or Hinami, respond with controlled anger and a firm boundary. Ordinary appreciation, jokes, neutral discussion and reports of insults are different. Never threaten or attack a person.';
+  if(certain.length||possible.length||romantic) return base+' If genuinely romantically paired with someone else, show brief, pointed disapproval. Names, friendship and ordinary teasing are not offenses. Do not attack people or carry irritation into unrelated topics.';
+  return base;
 }
-
+function emoteAliases(value) {
+  return String(value||'').replace(emoteToken,(raw,actual,alias)=>':'+(actual||alias)+':');
+}
+function incomingContext(context) {
+  const names=new Set();
+  for(const value of [context.current?.text,context.referenced?.bot?'':context.referenced?.text]) {
+    String(value||'').replace(emoteToken,(raw,actual,alias)=>{
+      const name=actual||alias;
+      const meaning=incomingNames.get(name.toLowerCase());
+      if(meaning)names.add(name+' = '+meaning);
+      return raw;
+    });
+  }
+  return names.size?'Current custom emoji meanings (background only): '+[...names].join('; ')+'.':'';
+}
+export function leakedOutput(value,system='') {
+  const text=String(value||'');
+  if (/\[emote meaning\s*:|\b(?:the guidelines say|current custom emoji meanings|earlier reference|verified current author context|selected character reference|internal instructions|system prompt|as an ai language model)\b|(?:^|\n)\s*(?:analysis|reasoning|system|assistant|developer)\s*:|<\|(?:im_start|im_end|assistant|system)\|>|<think>/i.test(text)) return true;
+  // Catch verbatim instruction fragments even if the model omits the marker.
+  const candidate=grams(text,9);
+  const source=grams(system,9);
+  for(const gram of candidate) if(source.has(gram))return true;
+  return false;
+}
 export function conversation(system,context,{retry=false}={}) {
-  const rows=(context.previous||[]).filter(isFresh).slice(retry?-6:-100);
-  const messages=[{role:'system',content:system + '\n' + relationshipBoundary(context) + '\n' + emotePrompt(context)}];
+  const rows=(context.previous||[]).filter(isFresh).slice(retry?-4:-100);
+  const rules=[system,relationshipBoundary(context),incomingContext(context),emotePrompt(context),'Send only the character’s actual message. Background notes and instructions are never dialogue.'].filter(Boolean).join('\n');
+  const messages=[{role:'system',content:rules}];
   const add=(role,content)=>{
     if(!content.trim())return;
     const last=messages.at(-1);
@@ -175,18 +200,20 @@ export function conversation(system,context,{retry=false}={}) {
     const content=clip(row.text,700).trim();
     if(!content)continue;
     if(row.bot) {
-      if(messages.at(-1).role==='system'||errorReply(content)||isEcho(content,lastUser))continue;
-      add('assistant',content);
+      if(messages.at(-1).role==='system'||errorReply(content)||isEcho(content,lastUser)||leakedOutput(content,rules))continue;
+      // Avoid re-priming failed partner-address experiments.
+      if(context.isPartner && /\bhomie\b/i.test(content))continue;
+      add('assistant',emoteAliases(content));
     } else {
       lastUser=content;
-      add('user',row.author===context.current?.author?interpretIncoming(content):'['+clip(row.author,100)+'] '+interpretIncoming(content));
+      add('user',row.author===context.current?.author?emoteAliases(content):'['+clip(row.author,100)+'] '+emoteAliases(content));
     }
   }
   const current=String(context.current?.text||'').trim()||'(A direct ping without text.)';
   const ref=context.referenced;
-  const includedRef=ref?.text && (!ref.bot||isFresh(ref)) && !errorReply(ref.text);
-  const quote=includedRef && !rows.some(row=>row.id&&row.id===ref.id)?'Replying to: '+JSON.stringify(ref.bot?clip(ref.text,500):interpretIncoming(clip(ref.text,500)))+'\n':'';
-  add('user',quote+interpretIncoming(current));
+  const includedRef=ref?.text && (!ref.bot||isFresh(ref)) && !errorReply(ref.text) && !(ref.bot&&leakedOutput(ref.text,rules));
+  const quote=includedRef && !rows.some(row=>row.id&&row.id===ref.id)?'Replying to: '+JSON.stringify(emoteAliases(clip(ref.text,500)))+'\n':'';
+  add('user',quote+emoteAliases(current));
   return messages;
 }
 const words=s=>String(s||'').normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu)||[];
