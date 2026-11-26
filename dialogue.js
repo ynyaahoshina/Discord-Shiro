@@ -102,9 +102,66 @@ export function emotePrompt(context) {
     +Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]).join('\n');
 }
 
+
+const INCOMING_EMOTES = Object.freeze({
+  T_hoshinya: 'affectionate Hoshina and Hinami couple reaction',
+  Germ_narumi: 'goofy Narumi germ; teasing Narumi',
+  HinamiShock: 'surprise, shock or disbelief',
+  Airrun: 'running away, rushing or playfully fleeing',
+  Hinami67: 'Hinami 67 meme reaction',
+  MaiFlower: 'offering a flower; appreciation or kindness',
+  Mai67: 'Mai 67 meme reaction',
+  IzumiEat: 'eating, snacking or watching the situation unfold',
+  HinamiHeart: 'affection or a heart reaction',
+  HinamiPee: 'silly toilet-humor reaction',
+  HikariHoshinaPenggolenbyMax: 'little penguin-like Hikari or family reaction',
+  HoshinaLaugh: 'laughter or amusement'
+});
+const incomingNames = new Map(Object.entries(INCOMING_EMOTES).map(([name,meaning])=>[name.toLowerCase(),meaning]));
+export function interpretIncoming(value) {
+  return String(value||'').replace(emoteToken,(raw,actual,alias)=>{
+    const name=actual||alias;
+    const meaning=incomingNames.get(name.toLowerCase());
+    return meaning ? ':'+name+': [emote meaning: '+meaning+']' : raw;
+  });
+}
+const selfName = /^(?:soshiro|shiro+|hoshi|hoshina+|shina+)$/i;
+const partnerName = /^(?:hinami|hina|ynaa?|ynya+|sugawara)$/i;
+const ownShip = /^(?:t_)?(?:hosh(?:i|ina)|shina|shiro|soshiro)(?:ynaa?|ynya+|hina(?:mi)?)$|^(?:ynaa?|ynya+|hina(?:mi)?)(?:hosh(?:i|ina)|shina|shiro|soshiro)$/i;
+const ordinary = /^(?:hoshino|hoshizora|hoshikawa|shinigami|shinaichi|shinan|shinaide|shinanai|shinagawa)$/i;
+const knownOtherShip = /^(?:naru(?:mi)?(?:hoshi(?:na)?|shina|shiro)|(?:hoshi(?:na)?|shina|shiro)naru(?:mi)?|(?:kaf(?:ka)?|reno|mina|kikoru|soichiro|saki)(?:hoshi(?:na)?|shina|shiro)|(?:hoshi(?:na)?|shina|shiro)(?:kaf(?:ka)?|reno|mina|kikoru|soichiro|saki))$/i;
+export function shipSignals(value) {
+  const text=String(value||'');
+  // Ignore our own approved emotes before considering unknown compound aliases.
+  const stripped=text.replace(emoteToken,(raw,a,b)=>incomingNames.has((a||b).toLowerCase())?' ':(' '+(a||b)+' '));
+  const certain=new Set(),possible=new Set();
+  for(const match of stripped.matchAll(/\b([A-Za-z]+)\s*(?:[×/]|[xX]\s+|\s+[xX])\s*([A-Za-z]+)\b/g)){
+    const [,a,b]=match;
+    if((selfName.test(a)&&!partnerName.test(b)&&!selfName.test(b))||(selfName.test(b)&&!partnerName.test(a)&&!selfName.test(a)))certain.add(a+' x '+b);
+  }
+  for(const name of stripped.match(/[A-Za-z][A-Za-z0-9_]*/g)||[]){
+    if(selfName.test(name)||ownShip.test(name)||ordinary.test(name))continue;
+    if(knownOtherShip.test(name)){certain.add(name);continue;}
+    // Novel portmanteaus are hints, not proof: names and ordinary words can overlap.
+    if(/^(?:hoshi(?:na)?|shina|shiro)[A-Za-z]{2,}$/i.test(name)||/^[A-Za-z]{2,}(?:hoshi|shina|shiro)$/i.test(name)){
+      if(!/^(?:soshiro|hoshina|shinano|hoshinas|shiros)$/i.test(name))possible.add(name);
+    }
+  }
+  return {certain:[...certain].slice(0,8),possible:[...possible].slice(0,8)};
+}
+export function relationshipBoundary(context) {
+  const current=shipSignals(context.current?.text);
+  const ref=context.referenced&&!context.referenced.bot?shipSignals(context.referenced.text):{certain:[],possible:[]};
+  const certain=[...new Set([...current.certain,...ref.certain])];
+  const possible=[...new Set([...current.possible,...ref.possible])];
+  const base='In this fictional continuity, Hoshina is already committed to his established partner. If the current speaker genuinely ships you romantically with someone else, or deliberately sends you that ship to tease you, take personal offense or show pointed, incredulous disapproval in character. Keep it about being romantically paired with the wrong person: a brief sharp objection, dry retort, or firm refusal is appropriate. Do not reciprocate or act interested. Do not attack the sender, the other character, any fandom, or anyone’s orientation. This is a personal relationship boundary, not a judgment of other fans. Ordinary mentions, names, platonic pairings, innocent nicknames, and your own established pairing are not reasons to be offended. Do not keep carrying the offense into unrelated later turns.';
+  const hint=certain.length?' The latest message or its user reply target contains a likely alternate-ship reference: '+JSON.stringify(certain)+'. Interpret the actual context before reacting.':possible.length?' Possible ship-name fragments in the latest message or its user reply target: '+JSON.stringify(possible)+'. These may just be names; react only if the meaning is actually romantic shipping.':'';
+  return base+hint;
+}
+
 export function conversation(system,context,{retry=false}={}) {
   const rows=(context.previous||[]).filter(isFresh).slice(retry?-6:-100);
-  const messages=[{role:'system',content:system + '\n' + emotePrompt(context)}];
+  const messages=[{role:'system',content:system + '\n' + relationshipBoundary(context) + '\n' + emotePrompt(context)}];
   const add=(role,content)=>{
     if(!content.trim())return;
     const last=messages.at(-1);
@@ -120,14 +177,14 @@ export function conversation(system,context,{retry=false}={}) {
       add('assistant',content);
     } else {
       lastUser=content;
-      add('user',row.author===context.current?.author?content:'['+clip(row.author,100)+'] '+content);
+      add('user',row.author===context.current?.author?interpretIncoming(content):'['+clip(row.author,100)+'] '+interpretIncoming(content));
     }
   }
   const current=String(context.current?.text||'').trim()||'(A direct ping without text.)';
   const ref=context.referenced;
   const includedRef=ref?.text && (!ref.bot||isFresh(ref)) && !errorReply(ref.text);
-  const quote=includedRef && !rows.some(row=>row.id&&row.id===ref.id)?'Replying to: '+JSON.stringify(clip(ref.text,500))+'\n':'';
-  add('user',quote+current);
+  const quote=includedRef && !rows.some(row=>row.id&&row.id===ref.id)?'Replying to: '+JSON.stringify(ref.bot?clip(ref.text,500):interpretIncoming(clip(ref.text,500)))+'\n':'';
+  add('user',quote+interpretIncoming(current));
   return messages;
 }
 const words=s=>String(s||'').normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu)||[];
