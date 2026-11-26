@@ -86,7 +86,7 @@ export function withoutEmotes(value) {
 export function allowEmotes(context) {
   const replies=(context.previous||[]).filter(row=>row.bot&&isFresh(row)&&!errorReply(String(row.text||'')));
   const recent=replies.slice(-8);
-  return recent.length===8 && recent.every(row=>withoutEmotes(row.text)===String(row.text||'').trim());
+  return recent.length===8 && recent.every(row=>withoutEmotes(gifAliases(row.text))===String(row.text||'').trim());
 }
 
 
@@ -104,7 +104,66 @@ export const EMOTE_GUIDE = Object.freeze({
   HikariHoshinaPenggolenbyMax: 'Animated GIF of your daughter Hikari Hoshina (Penggoleng, meaning penguin) flapping her little penguin wings; use for relevant cute, excited or playful family moments with the verified partner.',
   HoshinaLaugh: 'Hoshina laughing; something genuinely funny, not every joke.'
 });
+export const GIF_GUIDE = Object.freeze({
+  "gif_HoshiYnaBonk": {
+    "url": "https://cdn.discordapp.com/attachments/1421035371860594769/1476861054310154260/kaiju-no.gif",
+    "partner": true,
+    "mood": "Anime-style slapstick of Hoshina mock-choking Hinami in comic exasperation. Only for unmistakably mutual silly banter or absurd provocation; never actual anger, conflict, threats, fear, injury or serious distress. Not a romantic or sexual reaction."
+  },
+  "gif_HoshiYnaHeadpat": {
+    "url": "https://cdn.discordapp.com/attachments/1465319823784280278/1492102549589721178/Untitled_Artwork.gif",
+    "partner": true,
+    "mood": "Hoshina smiling and patting a flustered Hinami on the head. Fond amusement, affectionate teasing, praise or a small gesture of comfort."
+  },
+  "gif_HoshiYnaTwerk": {
+    "url": "https://cdn.discordapp.com/attachments/1453846405247402205/1490457488267673780/IMG_5732.gif",
+    "partner": true,
+    "mood": "Hoshina visibly unimpressed while Hinami twerks. Deadpan disbelief or comic exasperation at her outrageous dancing or deliberately silly antics; not genuine anger."
+  },
+  "gif_TenseShina": {
+    "url": "https://cdn.discordapp.com/attachments/1564444537324052532/1564444538028691456/tenseshina.gif",
+    "partner": true,
+    "mood": "Agitated Hoshina with Hinami peeking beside him. Comic tension, restrained annoyance or exasperation at a playful predicament; not a threat or a response to genuine distress."
+  },
+  "gif_CryingShina": {
+    "url": "https://gif.fxtwitter.com/tweet_video/G3GCRo2bEAABXZZ.gif",
+    "partner": false,
+    "mood": "Tiny chibi Shina flattened on the ground and crying. Playful defeat, exaggerated disappointment, sulking or being dramatically overwhelmed by a harmless joke."
+  },
+  "gif_SleepyShina": {
+    "url": "https://gif.fxtwitter.com/tweet_video/G3OGiD_agAA1Bsb.gif",
+    "partner": false,
+    "mood": "Bored or sleepy little chibi Shina. Low energy, waiting, sleepiness, dry boredom or a gently unimpressed reaction."
+  },
+  "gif_BarkingShina": {
+    "url": "https://gif.fxtwitter.com/tweet_video/G27W8jdaoAE9yer.gif",
+    "partner": false,
+    "mood": "Cute barking chibi Shina with tiny outstretched arms. Playful excitement, mock protest, a silly challenge or lively teasing."
+  }
+});
+
 const emoteToken = /<a?:([A-Za-z0-9_]+):\d+>|:([A-Za-z0-9_]{2,}):/g;
+
+const gifUrls=new Map(Object.entries(GIF_GUIDE).map(([name,item])=>[item.url,name]));
+// Recognize the supplied links even if Discord adds temporary signed query parameters.
+function gifAliases(value) {
+  return String(value||'').replace(/https:\/\/(?:cdn\.discordapp\.com\/attachments\/[0-9]+\/[0-9]+\/[A-Za-z0-9_.%-]+\.gif|gif\.fxtwitter\.com\/tweet_video\/[A-Za-z0-9_-]+\.gif)(?:\?[^\s<>"']*)?/gi,raw=>{
+    const name=gifUrls.get(raw.split('?')[0]);
+    return name?':'+name+':':raw;
+  });
+}
+export function availableGifs(context) {
+  return Object.fromEntries(Object.entries(GIF_GUIDE).filter(([name,item])=>{
+    if(item.partner&&!context.isPartner)return false;
+    if(name==='gif_HoshiYnaBonk'){
+      const text=String(context.current?.text||'');
+      // A slapstick neck-grab must not be selected in a serious or threatening exchange.
+      if(/\b(?:hurt|injur(?:y|ed)|scared|afraid|threat|kill|chok(?:e|ing)|strangl\w*|abuse|violence|serious|stop|unsafe|suicid\w*|self.harm|panic|crying|trauma)\b/i.test(text))return false;
+    }
+    return true;
+  }).map(([name,item])=>[name,item.url]));
+}
+
 export function availableEmotes(context) {
   return Object.fromEntries(Object.entries(context.emotes || {}).filter(([name,tag]) =>
     Object.hasOwn(EMOTE_GUIDE,name) && typeof tag === 'string' &&
@@ -112,22 +171,31 @@ export function availableEmotes(context) {
     (context.isPartner || !['T_hoshinya','HinamiHeart','HikariHoshinaPenggolenbyMax'].includes(name))));
 }
 export function renderApprovedEmotes(value,context) {
-  const allowed = allowEmotes(context) ? availableEmotes(context) : {};
-  let selected = '';
-  const placeholder = '\uE000';
-  const text = String(value || '').replace(/\uE000/g,'').replace(emoteToken,(_,actual,alias)=>{
+  const eligible=allowEmotes(context);
+  const allowed=eligible?{...availableEmotes(context),...availableGifs(context)}:{};
+  let selected='',isGif=false;
+  const placeholder='\uE000';
+  // Never allow a model to supply an arbitrary GIF URL as a reaction.
+  const source=gifAliases(value).replace(/https?:\/\/[^\s<>"']+\.gif(?:\?[^\s<>"']*)?/gi,'');
+  const text=source.replace(/\uE000/g,'').replace(emoteToken,(_,actual,alias)=>{
     const name=actual||alias;
-    if (!selected && Object.hasOwn(allowed,name)) { selected=allowed[name]; return placeholder; }
+    if(!selected&&Object.hasOwn(allowed,name)){
+      selected=allowed[name];isGif=Object.hasOwn(GIF_GUIDE,name);return placeholder;
+    }
     return '';
   });
-  return withoutEmotes(text).replace(placeholder,selected).trim();
+  const plain=withoutEmotes(text);
+  if(isGif){
+    const words=plain.replace(placeholder,'').trim();
+    return words?words+'\n'+selected:selected;
+  }
+  return plain.replace(placeholder,selected).trim();
 }
 export function emotePrompt(context) {
-  const available=availableEmotes(context);
-  if(!allowEmotes(context)||!Object.keys(available).length)
-    return 'For this reply, use plain text without emojis or emoticons. Express tone through your wording.';
-  return 'Plain text is normal. If a reaction genuinely fits, optionally use ONE of these server emotes by typing its exact :name: alias. No generic emojis, other emotes, or emoticons. Never force an emote.\n'
-    +Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]).join('\n');
+  if(!allowEmotes(context))return 'For this reply, use plain text without emojis, GIFs or emoticons. Express tone through your wording.';
+  const available=availableEmotes(context),gifs=availableGifs(context);
+  return 'Plain text is normal. If a reaction genuinely fits, optionally select ONE server emote OR ONE GIF by typing its exact :name: alias. A GIF may stand alone or accompany a short natural message. Use a reaction only if it adds something; never force one. No raw GIF URLs, generic emojis, other emotes, or emoticons.\n'
+    +Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]).concat(Object.keys(gifs).map(name=>':'+name+': '+GIF_GUIDE[name].mood)).join('\n');
 }
 
 
@@ -145,7 +213,7 @@ const INCOMING_EMOTES = Object.freeze({
   HikariHoshinaPenggolenbyMax: 'animated GIF of Penggoleng (meaning penguin), Hikari Hoshina, Hoshina and Hinami’s daughter, flapping her little penguin wings; a cute family reaction',
   HoshinaLaugh: 'laughter or amusement'
 });
-const incomingNames = new Map(Object.entries(INCOMING_EMOTES).map(([name,meaning])=>[name.toLowerCase(),meaning]));
+const incomingNames = new Map([...Object.entries(INCOMING_EMOTES),...Object.entries(GIF_GUIDE).map(([name,item])=>[name,item.mood])].map(([name,meaning])=>[name.toLowerCase(),meaning]));
 export function interpretIncoming(value) {
   return String(value||'').replace(emoteToken,(raw,actual,alias)=>{
     const name=actual||alias;
@@ -190,7 +258,7 @@ export function relationshipBoundary(context) {
   return base;
 }
 function emoteAliases(value) {
-  return String(value||'').replace(emoteToken,(raw,actual,alias)=>':'+(actual||alias)+':');
+  return gifAliases(value).replace(emoteToken,(raw,actual,alias)=>':'+(actual||alias)+':');
 }
 function incomingContext(context) {
   const names=new Set();
@@ -205,9 +273,9 @@ function incomingContext(context) {
   const values=[current.text,...ownRecent.map(row=>row.text)];
   if(ref?.text&&(!ref.bot||(isFresh(ref)&&!errorReply(ref.text))))values.push(ref.text);
   for(const value of values) {
-    String(value||'').replace(emoteToken,(raw,actual,alias)=>{
+    gifAliases(value).replace(emoteToken,(raw,actual,alias)=>{
       const name=actual||alias;
-      if(!context.isPartner&&/^(?:t_hoshinya|hinamiheart|hikarihoshinapenggolenbymax)$/i.test(name))return raw;
+      if(!context.isPartner&&(/^(?:t_hoshinya|hinamiheart|hikarihoshinapenggolenbymax)$/i.test(name)||GIF_GUIDE[name]?.partner))return raw;
       const meaning=incomingNames.get(name.toLowerCase());
       if(meaning)names.add(name+' = '+meaning);
       return raw;
@@ -328,11 +396,11 @@ export function recycled(answer,context){
   if(isEcho(answer,latest))return true;
   const a=words(answer),b=words(latest);
   if(b.length>=3&&a.length>b.length&&b.every((w,i)=>a[i]===w))return true;
-  const candidate=grams(answer,7);
+  const candidate=grams(emoteAliases(answer),7);
   if(!candidate.size)return false;
   // Old bad replies can be checked for duplication without sending them to the model.
   for(const row of (context.previous||[])){
-    const prior=grams(row.text,7);
+    const prior=grams(emoteAliases(row.text),7);
     for(const g of candidate)if(prior.has(g)&&!grams(latest,7).has(g))return true;
   }
   return false;
