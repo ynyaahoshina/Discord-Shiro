@@ -22,7 +22,10 @@ const last = new Map();
 let busy = false, day = '', used = 0;
 const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
 const record = m => ({ author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, text: clip(m.cleanContent) });
-const model = (env.CHAT_MODEL || 'qwen/qwen3.5-397b-a17b').trim();
+const configuredModel = env.CHAT_MODEL?.trim();
+const model = configuredModel || 'nvidia/nemotron-3.5-lightning-30b-a3b';
+console.log('[CONFIG] revision=nemotron-default-v1 CHAT_MODEL=' + (configuredModel ? safeModel(configuredModel) : '(missing or blank; using Nemotron default)'));
+function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/$/, '') + '/chat/completions';
 function safeError(value) {
   let result = String(value ?? '');
