@@ -85,8 +85,8 @@ export function withoutEmotes(value) {
 }
 export function allowEmotes(context) {
   const replies=(context.previous||[]).filter(row=>row.bot&&isFresh(row)&&!errorReply(String(row.text||'')));
-  const recent=replies.slice(-8);
-  return recent.length===8 && recent.every(row=>withoutEmotes(gifAliases(row.text))===String(row.text||'').trim());
+  const recent=replies.slice(-5);
+  return recent.length===5 && recent.every(row=>withoutEmotes(gifAliases(row.text))===String(row.text||'').trim());
 }
 
 
@@ -108,7 +108,7 @@ export const GIF_GUIDE = Object.freeze({
 "gif_HinamiDownvote": {"url":"https://media.discordapp.net/attachments/1421035371860594769/1508312866946813972/Untitled_Artwork.gif?ex=6b08fad2&is=6b07a952&hm=303064c5382b5c6409ad454d21d76c9c6a9adb61e2d7425bf92335a21907a0e5&width=640&height=640","partner":false,"mood":"Hinami holding a large down arrow. Playful disapproval, a joking veto, or an unimpressed reaction to a silly opinion. Can be used with server members; not a personal attack."},
 "gif_BrickLove": {"url":"https://media.discordapp.net/attachments/1421035371860594769/1487899595823517798/IMG_5708.gif?ex=6b09343b&is=6b07e2bb&hm=1c256da13b46e30ce6b5b8f807c98f3352d4e3cedc717899ff97a6a77094ccb3","partner":true,"mood":"Fictional slapstick: Hinami throws a brick, Hoshina dodges, then pats her head when she is disappointed it missed. Fondly teasing her exaggerated cartoon antics; only clearly playful exchanges, never actual threats, injuries or arguments."},
 "gif_HikariPenggoleng": {"url":"https://media.discordapp.net/attachments/1542566379805216769/1572387639309504522/Untitled_Artwork.gif?ex=6b09645a&is=6b0812da&hm=78fe1ef99331cada176b49d6568c1bde71635dd5b4cc420595774c96b18be3a9","partner":false,"mood":"Hikari Hoshina, affectionately called Penggoleng, flapping her penguin wings. She is Hoshina and Hinami's daughter in their family continuity. Happy teasing, delight, celebration or proud family amusement. This GIF is also a familiar YumeServer reaction, allowed with other members."},
-  "gif_HoshiYnaBonk": {
+  "gif_HoshiYnaChoke": {
     "url": "https://cdn.discordapp.com/attachments/1421035371860594769/1476861054310154260/kaiju-no.gif",
     "partner": true,
     "mood": "Anime-style slapstick of Hoshina mock-choking Hinami in comic exasperation. Only for unmistakably mutual silly banter or absurd provocation; never actual anger, conflict, threats, fear, injury or serious distress. Not a romantic or sexual reaction."
@@ -200,7 +200,7 @@ export function availableMemories(context) {
 export function availableGifs(context) {
   return Object.fromEntries(Object.entries(GIF_GUIDE).filter(([name,item])=>{
     if(item.partner&&!context.isPartner)return false;
-    if(name==='gif_HoshiYnaBonk'||name==='gif_BrickLove'){
+    if(name==='gif_HoshiYnaChoke'||name==='gif_BrickLove'){
       const text=String(context.current?.text||'');
       // A slapstick neck-grab must not be selected in a serious or threatening exchange.
       if(/\b(?:hurt|injur(?:y|ed)|scared|afraid|threat|kill|chok(?:e|ing)|strangl\w*|abuse|violence|serious|stop|unsafe|suicid\w*|self.harm|panic|crying|trauma)\b/i.test(text))return false;
@@ -257,7 +257,7 @@ export function emotePrompt(context) {
   if(!Object.keys(available).length&&!Object.keys(gifs).length&&!Object.keys(memories).length)
     return 'For this reply, use plain text without emojis, GIFs, images or emoticons. Express tone through your wording.';
   const rules=['Plain text is normal. Optionally choose at most ONE approved media alias for this message, never a raw URL.'];
-  if(eligible)rules.push('A server emote or reaction GIF may stand alone or accompany dialogue when genuinely fitting. Never force a reaction.',
+  if(eligible)rules.push('A server emote or reaction GIF may stand alone or accompany dialogue when genuinely fitting. Feel free to use a well-timed reaction to express amusement, affection, surprise or playful exasperation when it adds something to the exchange. Most replies should still be ordinary text; never force a reaction.',
     ...Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]),
     ...Object.keys(gifs).map(name=>':'+name+': '+GIF_GUIDE[name].mood));
   if(Object.keys(memories).length)rules.push('Memory artwork is a rare deliberate share from your fictional shared history, NOT a normal reaction. Use only when it makes a specific conversational point, surprises Hinami affectionately, recalls the pictured moment, or proudly shows her off. Prefer a brief relevant caption in your own voice; never invent factual details about the image. Most replies should not contain artwork.',
