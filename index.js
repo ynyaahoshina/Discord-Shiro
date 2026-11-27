@@ -3,6 +3,9 @@ import { readFile, readdir } from 'node:fs/promises';
 import { partnerBanter, buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput, isEcho } from './dialogue.js';
 
 const env = process.env;
+// Explicitly verified by the owner; Discord snowflakes remain strings.
+const verifiedPartnerId='399942598791266304';
+const verifiedPartnerName='Hinami';
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
   if (!env[key]?.trim()) throw new Error('Missing configuration: ' + key);
 }
@@ -242,7 +245,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=expanded-voice-library-v33 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=verified-partner-identity-v34 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -265,7 +268,7 @@ async function loadPersonality() {
   const database = env.NOTION_BOT_DATABASE_ID?.trim();
   if (!secret || !database) {
     console.warn('[NOTION] Missing secret or database ID; using local personality');
-    return { core: personality, partnerId: '', partnerName: '' };
+    return { core: personality, partnerId: verifiedPartnerId, partnerName: verifiedPartnerName };
   }
   if (profileCache && Date.now() - profileLoadedAt < 300000) return profileCache;
   try {
@@ -284,13 +287,14 @@ async function loadPersonality() {
     const core = notionText(data.results[0], 'Core_Instructions');
     if (!core) throw new Error('Core_Instructions missing');
     const partnerId = notionText(data.results[0], 'Partner_ID').replace(/^<@!?([0-9]+)>$/, '$1').trim();
-    profileCache = { core: clip(core, 60000), partnerLore: privateLoreChannels.size ? clip(notionText(data.results[0], 'Partner_Lore'), 60000) : '', partnerId: /^\d{17,20}$/.test(partnerId) ? partnerId : '', partnerName: clip(notionText(data.results[0], 'Partner_Name'), 120) };
+    profileCache = { core: clip(core, 60000), partnerLore: privateLoreChannels.size ? clip(notionText(data.results[0], 'Partner_Lore'), 60000) : '', partnerId: verifiedPartnerId, partnerName: verifiedPartnerName };
+    if(partnerId!==verifiedPartnerId)console.warn('[NOTION] Partner ID differs from verified configuration; using verified Discord identity');
     profileLoadedAt = Date.now();
     console.log('[NOTION] Character personality loaded; partner ID configured=' + Boolean(profileCache.partnerId));
     return profileCache;
   } catch (error) {
     console.warn('[NOTION] Personality unavailable: ' + safeError(error.message));
-    return profileCache || { core: personality, partnerId: '', partnerName: '' };
+    return profileCache || { core: personality, partnerId: verifiedPartnerId, partnerName: verifiedPartnerName };
   }
 }
 async function readThreadHistory(message) {
@@ -403,7 +407,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
   const voiceKey=chooseVoice({...context,isPartner});
   if(voiceKey)return {voiceKey,primary:'',followup:''};
-  context = {...context, isPartner, emotes: allowEmotes(context) ? await resolveGuildEmotes(guild) : {}};
+  context = {...context, isPartner, current:isPartner?{...context.current,author:verifiedPartnerName}:context.current, emotes: allowEmotes(context) ? await resolveGuildEmotes(guild) : {}};
   context = {...context, previous:(context.previous||[]).filter(row=>!row.bot||!sceneLeak(row.text)), referenced:context.referenced?.bot&&sceneLeak(context.referenced.text)?null:context.referenced};
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
@@ -491,7 +495,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
 
 // Three daily initiative windows: deterministic pseudo-random Philippine time and Discord-backed
 // duplicate detection, so normal redeployments do not reset the daily schedule.
-const initiativePartner='399942598791266304';
+const initiativePartner=verifiedPartnerId;
 const initiativeChannel=env.DAILY_INITIATIVE_CHANNEL_ID?.trim()||(channels.size===1?[...channels][0]:'');
 const initiativeWindowMs=15*60*1000;
 const initiativeQuietMs=60*60*1000;
