@@ -215,13 +215,28 @@ export function availableEmotes(context) {
     new RegExp('^<a?:' + name + ':\\d+>$').test(tag) &&
     (context.isPartner || !['T_hoshinya','HinamiHeart','HikariHoshinaPenggolenbyMax'].includes(name))));
 }
+// Recover known media aliases when a model omits a colon or changes casing.
+// Never invent a URL or grant permission based on the alias spelling.
+const canonicalReactionNames=new Map([...Object.keys(EMOTE_GUIDE),...Object.keys(MEDIA_GUIDE)].map(name=>[name.toLowerCase(),name]));
+function repairReactionAliases(value) {
+  return String(value||'').replace(/<a?:([A-Za-z0-9_]+):\d+>|(:[A-Za-z0-9_]{2,}:?)|\b(?:gif|mem)_[A-Za-z0-9_]+\b/gi,(raw,actual,colon)=>{
+    if(actual)return raw;
+    const name=(colon||raw).replace(/^:|:$/g,'');
+    const canonical=canonicalReactionNames.get(name.toLowerCase());
+    if(canonical)return ':'+canonical+':';
+    // Unknown media markers are internal tokens, never Discord-visible text.
+    if(/^(?:gif|mem)_/i.test(name))return '';
+    return raw;
+  });
+}
+
 export function renderApprovedEmotes(value,context) {
   const eligible=allowEmotes(context);
   const allowed={...(eligible?{...availableEmotes(context),...availableGifs(context)}:{}),...availableMemories(context)};
   let selected='',isGif=false;
   const placeholder='\uE000';
   // Never allow a model to supply an arbitrary GIF URL as a reaction.
-  const source=gifAliases(value).replace(/https?:\/\/[^\s<>"']+\.(?:gif|png|webp|jpe?g)(?:\?[^\s<>"']*)?/gi,'');
+  const source=repairReactionAliases(gifAliases(value)).replace(/https?:\/\/[^\s<>"']+\.(?:gif|png|webp|jpe?g)(?:\?[^\s<>"']*)?/gi,'');
   const text=source.replace(/\uE000/g,'').replace(emoteToken,(_,actual,alias)=>{
     const name=actual||alias;
     if(!selected&&Object.hasOwn(allowed,name)){
