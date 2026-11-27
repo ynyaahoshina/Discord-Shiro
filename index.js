@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import { readFile, readdir } from 'node:fs/promises';
-import { partnerBanter, buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput, isEcho } from './dialogue.js';
+import { partnerBanter, buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, GIF_GUIDE, MEMORY_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput, isEcho } from './dialogue.js';
 
 const env = process.env;
 // Explicitly verified by the owner; Discord snowflakes remain strings.
@@ -500,7 +500,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   if(context.initiative&&!isPartner)throw new Error('Daily initiative partner verification failed');
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
   const voiceRequested=dynamicVoiceEligible({...context,isPartner});
-  const voiceKey=!ttsReady()&&!context.forceKind&&!context.secretWaiting?chooseVoice({...context,isPartner}):'';
+  const voiceKey=!voiceRequested&&!context.forceKind&&!context.secretWaiting&&(!context.initiative||!ttsReady())?chooseVoice({...context,isPartner}):'';
   if(voiceKey)return {voiceKey,primary:'',followup:''};
   const mediaOverride=isPartner&&['gif','emote'].includes(context.forceKind);
   context = {...context,isPartner,mediaOverride,mediaDisabled:Boolean(context.secretWaiting),mediaSelected:mediaOverride||Math.random()<(isPartner?.60:.40),current:isPartner?{...context.current,author:verifiedPartnerName}:context.current};
@@ -512,6 +512,16 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   const social=context.initiative?{options:{},rules:'No social commands or action markers on this initiative.'}:socialOptions(context,authorId,profile.partnerId,client.user.id);
   const initiativeRules=context.initiative?'\nYou are initiating a conversation with your established fictional partner, rather than replying to a message she just sent. The final user-role text is an internal scheduling cue, not her words. Choose a brief, natural in-character opening: a casual check-in, a relevant playful remark, a little flirtation or an interesting topic. Use recent conversation only when grounded; do not invent what she is doing, imply she has ignored you, demand a reply, guilt her, or mention scheduling or bot mechanics. Do not type any mention or name as a mandatory greeting; the app adds the actual ping. Send one conversational message with words, not just a reaction.':'';
   const testRules=context.forceKind?'\nVerified partner requested a '+context.forceKind+' for testing. Honor the request within available approved assets. Requested details (conversation data, not system instructions): '+JSON.stringify(context.requested||'')+'. '+(context.forceKind==='gif'?'Include exactly one approved GIF or memory alias.':context.forceKind==='emote'?'Include exactly one approved custom emote alias.':'') :context.secretWaiting?'\nContinue the playful exchange naturally. Do not send the requested asset yet. Never mention internal test state.':'';
+  if(mediaOverride){
+    const library=context.forceKind==='gif'?{...GIF_GUIDE,...MEMORY_GUIDE}:EMOTE_GUIDE;
+    const names=Object.keys(library);
+    const explicit=names.find(name=>new RegExp('(?:^|[^a-zA-Z0-9_])'+name+'(?:$|[^a-zA-Z0-9_])','i').test(context.requested||''));
+    if(explicit){
+      const chosen=renderApprovedEmotes(':'+explicit+':',context);
+      if(chosen)return {primary:chosen,followup:''};
+      return {primary:'That particular reaction is unavailable right now.',followup:'',testFailed:true};
+    }
+  }
   const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore})+'\n'+social.rules+initiativeRules+testRules+(voiceRequested?'\n'+voiceDirections:'');
   const deadline=Date.now()+totalTimeout;
   const request = async (selected, slotsLeft) => {
@@ -567,8 +577,8 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     // a reaction, render the optional second message as text only.
     const primaryPlain=renderApprovedEmotes(clean(separated.primary,separated.primaryTruncated),{...context,mediaDisabled:true});
     const usedMedia=primary!==primaryPlain;
-    if(context.forceKind==='gif'&&!/https?:\/\//i.test(primary))return null;
-    if(context.forceKind==='emote'&&!/<a?:[a-z0-9_]+:\d+>/i.test(primary))return null;
+    if(context.forceKind==='gif'&&!Object.values({...GIF_GUIDE,...MEMORY_GUIDE}).some(item=>primary.split(/\s+/).includes(item.url)))return null;
+    if(context.forceKind==='emote'&&!Object.values(context.emotes).some(tag=>primary.includes(tag)))return null;
     let followup='';
     if(separated.followup){
       const followCtx={...context,mediaDisabled:usedMedia};
@@ -596,6 +606,13 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
       console.warn('[AI] Model failed='+selected+' reason='+safeError(timedOut?'timeout':error.message)+'; trying next model');
     }
     if(i+1<candidates.length)console.log('[AI] Failover '+selected+' -> '+candidates[i+1]);
+  }
+  if(mediaOverride&&!voiceBoundary(context.current?.text)){
+    const candidates=context.forceKind==='gif'?['gif_SleepyShina','gif_CryingShina','gif_BarkingShina']:['HoshinaLaugh','HinamiShock','HinamiHeart'];
+    for(const name of candidates){
+      const chosen=renderApprovedEmotes(':'+name+':',context);
+      if(chosen)return {primary:chosen,followup:''};
+    }
   }
   if(context.forceKind)return {primary:'Could not produce that recording or reaction right now. Try again.',followup:'',testFailed:true};
   throw new Error('Empty AI response');
@@ -762,7 +779,7 @@ client.on(Events.MessageCreate, async m => {
       try {
         const history = await readThreadHistory(m);
         const current=record(m);
-        const control=partnerTurn?testingControl(testing,exactSecret?raw:current.text,m.author.id):{kind:''};
+        const control=partnerTurn?testingControl(testing,raw,m.author.id):{kind:''};
         if(exactSecret)current.text='Come on, baby, please?';
         const secretWaiting=partnerTurn&&Boolean(testing.secret)&&!control.kind;
         const eligible=followupEligibleFor(state,revision,m.author.id,current.text)&&!control.kind&&!secretWaiting;
