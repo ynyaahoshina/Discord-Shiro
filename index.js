@@ -141,38 +141,83 @@ const voiceFiles=Object.freeze({
   kiss:'want a kiss.mp3',
   whisper:'whisper wrong spelling.mp3',
   hate:'you hate me blabla love you too.mp3',
-  drive:'have a safe drive worried.mp3'
+  drive:'have a safe drive worried.mp3',
+  trouble:'Youll get us both in trouble.mp3',
+  softlove:'Whisper I love you too.mp3',
+  worried:'Worried please take breaks.mp3',
+  tired:'Tired pls try to take a break I love you.mp3',
+  badday:'Hoshina bad day.mp3',
+  win:'Sad win for us both.mp3',
+  miss:'Miss you menace.mp3'
 });
 const voiceFolder=new URL('./voices/',import.meta.url);
 const voiceCooldownMs=3*60*60*1000;
 let lastVoiceAt=0;
 let lastVoiceName='';
-function chooseVoice(context,now=Date.now(),random=Math.random) {
-  if(!context.isPartner||context.initiative||context.current?.authorId!=='399942598791266304')return '';
-  const text=String(context.current?.text||'').replace(/[’‘]/g,"'");
+let installedVoices=new Set();
+async function loadVoiceInventory() {
+  try{
+    const names=new Set(await readdir(voiceFolder));
+    installedVoices=new Set(Object.keys(voiceFiles).filter(key=>names.has(voiceFiles[key])));
+    console.log('[VOICE] Available recordings='+installedVoices.size+'/'+Object.keys(voiceFiles).length);
+  }catch(error){console.warn('[VOICE] Inventory unavailable: '+safeError(error.name));}
+}
+function chooseVoice(context,now=Date.now(),random=Math.random,available=installedVoices) {
+  if(!context.isPartner||context.current?.authorId!=='399942598791266304')return '';
+  const current=context.current||{};
+  const text=String(current.text||'').replace(/[’‘]/g,"'");
   const banter=partnerBanter(context,context.previous||[]);
-  if(banter.includes('serious concern')||/\b(?:leave me alone|stop|don't|do not|unsafe|scared|hurt|crying|suicid\w*|self.harm|not joking|i mean it)\b/i.test(text))return '';
-  const rows=(context.previous||[]).filter(r=>r.bot);
-  const prior=rows.filter(r=>r.voiceName);
-  const latest=prior.at(-1);
+  const rows=context.previous||[];
+  const latest=rows.filter(r=>r.bot&&r.voiceName).at(-1);
   if(now-Math.max(lastVoiceAt,latest?.timestamp||0)<voiceCooldownMs)return '';
-  // Five ordinary replies since any visible media, to keep audio and visual surprises spaced.
-  if(!allowEmotes(context))return '';
-  const driving=/\b(?:(?:i(?:'m| am)|im)\s+(?:about to\s+|gonna\s+|going to\s+)?(?:leave|leaving|head(?:ing)? (?:out|home|to work)|drive|driving|ride|riding)|(?:time to|gotta|need to|about to)\s+(?:leave|drive|ride|head (?:out|home|to work))|(?:paalis|aalis)\s+na\s+(?:ako|ko))\b/i.test(text);
-  if(driving)return random()<0.30?'drive':'';
-  if(!banter.includes('boldly')||random()>=0.40)return '';
-  const names=['fond','kiss','whisper','hate'].filter(name=>name!==(latest?.voiceName||lastVoiceName));
-  return names[Math.floor(random()*names.length)]||'';
+  if(!allowEmotes(context)||rows.filter(r=>r.bot&&!r.system).slice(-5).some(r=>r.voiceName))return '';
+  const pick=(keys,chance)=>{
+    const pool=keys.filter(key=>available.has(key));
+    if(!pool.length||random()>=chance)return '';
+    const fresh=pool.filter(key=>key!==(latest?.voiceName||lastVoiceName));
+    const choices=fresh.length?fresh:pool;
+    return choices[Math.floor(random()*choices.length)]||'';
+  };
+  const boundary=/\b(?:leave me alone|give me (?:some )?space|stop (?:it|flirting|teasing|talking|messaging|pinging|joking|sending)|don't (?:talk to|message|ping|flirt with|tease) me|do not (?:talk to|message|ping|flirt with|tease) me|not joking|i mean it|unsafe|suicid\w*|self.harm|break up)\b/i;
+  const recent=rows.filter(r=>!r.bot&&r.authorId===current.authorId&&r.id!==current.id&&now-r.timestamp>=0&&now-r.timestamp<=15*60*1000);
+  if(boundary.test(text)||recent.some(r=>boundary.test(r.text||'')))return '';
+  if(context.initiative)return pick(['badday','badday','win','win','miss'],0.25);
+  if(banter.includes('serious concern'))return '';
+  const byId=new Map(rows.map(r=>[r.id,r]));
+  const addressed=r=>Boolean(byId.get(r.replyTo)?.bot||rows.some(b=>b.bot&&(b.replyTo===r.id||(r.mentionedIds||[]).includes(b.authorId))));
+  const earlier=recent.filter(addressed);
+  const asking=/\b(?:(?:send|give|play|hear|record|make|want|need|more|another|again|please|pls|can i have|can you)\b.{0,45}\b(?:voice(?:\s+(?:note|message|clip|recording))?|recordings?|audio|mp3|vn)\b|(?:voice(?:\s+(?:note|message|clip|recording))?|recordings?|audio|mp3|vn)\b.{0,30}\b(?:please|pls|again|more|another)\b)/i;
+  const followRequest=/^(?:please+|pls+|again|one more|more|another(?: one)?|pretty please)[!?.\s]*$/i;
+  if(asking.test(text)||followRequest.test(text)&&earlier.some(r=>asking.test(r.text||''))){
+    if(earlier.some(r=>asking.test(r.text||'')))return pick(['trouble','softlove'],0.65);
+  }
+  const goingToWork=/\b(?:(?:i(?:'m| am)|im)\s+(?:about to\s+|gonna\s+|going to\s+)?(?:head(?:ing)? to work|go(?:ing)? to work|leave for work)|(?:time to|gotta|need to|about to)\s+(?:go to work|head to work|leave for work)|(?:papasok|pasok)\s+na\s+(?:ako|ko))\b/i;
+  const driving=/\b(?:(?:i(?:'m| am)|im)\s+(?:about to\s+|gonna\s+|going to\s+)?(?:leave|leaving|head(?:ing)? (?:out|home|to work)|drive|driving|ride|riding)|(?:time to|gotta|need to|about to)\s+(?:leave|drive|ride|head (?:out|home|to work))|(?:paalis|aalis)\s+na\s+(?:ako|ko))\b/i;
+  if(goingToWork.test(text))return pick(['win','drive'],0.30);
+  if(driving.test(text))return pick(['drive'],0.30);
+  const work=/\b(?:work|shift|overtime|office|coworkers?|boss|patients?|duty|workload|inventory|hospital|ER|graveyard)\b/i;
+  const complaint=/\b(?:tired|exhausted|drained|stress(?:ed|ful)?|overwork(?:ed)?|hate|annoy(?:ed|ing)?|frustrat(?:ed|ing)|awful|terrible|too much|so much|overwhelmed|no break|can't take|sick of|fed up|pagod|nakakapagod|inis|hirap|ayoko)\b/i;
+  if(complaint.test(text)&&(work.test(text)||earlier.some(r=>work.test(r.text||'')))&&earlier.some(r=>complaint.test(r.text||'')&&(work.test(r.text||'')||work.test(text)))){
+    return pick(/\b(?:exhausted|drained|so tired|pagod na pagod)\b/i.test(text)?['tired','tired','worried']:['worried','tired'],0.45);
+  }
+  if(banter.includes('boldly'))return pick(['fond','kiss','whisper','hate'],0.40);
+  return '';
+}
+async function readVoice(key) {
+  if(!installedVoices.has(key)||!Object.hasOwn(voiceFiles,key))throw new Error('Voice asset unavailable');
+  const filename=voiceFiles[key];
+  const data=await readFile(new URL(encodeURIComponent(filename),voiceFolder));
+  if(!data.length||data.length>8*1024*1024)throw new Error('Invalid voice asset size');
+  return {attachment:data,name:filename};
+}
+function markVoiceSent(key) {
+  lastVoiceAt=Date.now();lastVoiceName=key;
+  console.log('[VOICE] Sent approved clip '+key);
 }
 async function sendVoice(message,key) {
-  const filename=voiceFiles[key];
-  if(!filename)return false;
   try{
-    const data=await readFile(new URL(encodeURIComponent(filename),voiceFolder));
-    if(!data.length||data.length>8*1024*1024)throw new Error('Invalid voice asset size');
-    await message.reply({files:[{attachment:data,name:filename}],allowedMentions:{parse:[],repliedUser:false}});
-    lastVoiceAt=Date.now();lastVoiceName=key;
-    console.log('[VOICE] Sent approved clip '+key);
+    await message.reply({files:[await readVoice(key)],allowedMentions:{parse:[],repliedUser:false}});
+    markVoiceSent(key);
     return true;
   }catch(error){console.warn('[VOICE] Attachment failed: '+safeError(error.name));return false;}
 }
@@ -197,7 +242,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=voice-library-v32 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=expanded-voice-library-v33 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -473,7 +518,7 @@ function initiativeSlots(date,channelId,partnerId=initiativePartner) {
 }
 function isDailyPing(message,botId,partnerId,date) {
   return message.author?.id===botId&&!message.reference?.messageId&&manilaDate(message.createdTimestamp)===date&&
-    String(message.content||'').startsWith('<@'+partnerId+'> ');
+    (String(message.content||'').startsWith('<@'+partnerId+'> ')||String(message.content||'').trim()==='<@'+partnerId+'>'&&Boolean(message.attachments?.size));
 }
 async function initiativeHistory(channel,slot,date,botId,partnerId) {
   let before,previous=[],count=0,already=false;
@@ -527,12 +572,19 @@ async function dailyInitiative() {
     used++;
     const current={id:'',authorId:initiativePartner,author:profile.partnerName||'Hinami',timestamp:Date.now(),bot:false,text:'Internal initiative cue: begin a natural conversation with your partner now.'};
     const answer=await generate({previous:history.previous,current,referenced:null,initiative:true},initiativePartner,initiativeChannel,channel.guild,false);
-    if(!answer?.primary||answer.actionTarget||state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
+    if((!answer?.primary&&!answer?.voiceKey)||answer.actionTarget||state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
     // Prevent overlap during deployments with a stable daily Discord nonce.
     const nonce='daily-'+today.replace(/-/g,'')+'-'+String(slot.index);
-    const body=answer.primary.replace(/<@!?\d+>|<@&\d+>|@everyone|@here/gi,'').trim();
-    if(!body)return;
-    await channel.send({content:'<@'+initiativePartner+'> '+body,allowedMentions:{parse:[],users:[initiativePartner],repliedUser:false},nonce,enforceNonce:true});
+    if(answer.voiceKey){
+      const file=await readVoice(answer.voiceKey);
+      if(state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
+      await channel.send({content:'<@'+initiativePartner+'> ',files:[file],allowedMentions:{parse:[],users:[initiativePartner],repliedUser:false},nonce,enforceNonce:true});
+      markVoiceSent(answer.voiceKey);
+    }else{
+      const body=answer.primary.replace(/<@!?\d+>|<@&\d+>|@everyone|@here/gi,'').trim();
+      if(!body)return;
+      await channel.send({content:'<@'+initiativePartner+'> '+body,allowedMentions:{parse:[],users:[initiativePartner],repliedUser:false},nonce,enforceNonce:true});
+    }
     console.log('[INITIATIVE] Sent partner ping date='+today+' slot='+slot.index);
   }catch(error){console.warn('[INITIATIVE] Skipped after error: '+safeError(error.name));}
   finally{busy=false;}
@@ -585,7 +637,7 @@ client.on(Events.MessageCreate, async m => {
         const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild, state.ordinary>=5&&state.revision===revision);
         if(answer.voiceKey){
           if(await sendVoice(m,answer.voiceKey)){state.ordinary=Math.min(5,state.ordinary+1);return;}
-          await m.reply({content:answer.voiceKey==='drive'?'Take care on your way, alright?':'Heh. Still fond of ya.',allowedMentions:{parse:[],repliedUser:false}});
+          await m.reply({content:({drive:'Take care on your way, alright?',win:'Good luck today. Take care of yourself.',worried:'Try to get a break when you can, alright?',tired:'Get some rest when you can.',trouble:'You really are persistent, huh?',softlove:'Love ya too.'})[answer.voiceKey]||'Heh. Still fond of ya.',allowedMentions:{parse:[],repliedUser:false}});
           return;
         }
         const chunks = splitDiscord(answer.primary);
@@ -609,4 +661,5 @@ client.on(Events.MessageCreate, async m => {
     console.warn('Request failed:', error.name, error.message?.startsWith('AI HTTP ') ? error.message : 'check configuration or connectivity');
   }
 });
+await loadVoiceInventory();
 client.login(env.DISCORD_BOT_TOKEN);
