@@ -62,12 +62,28 @@ function rememberVoice(message,voice){
   if(voiceTranscripts.size>200)voiceTranscripts.delete(voiceTranscripts.keys().next().value);
 }
 const ambientLast=new Map();
-function ambientEligible(text,channelId,now=Date.now(),random=Math.random) {
-  const line=String(text||'');
-  if(channelId!==initiativeChannel||voiceBoundary(line)||/\b(?:not (?:talking|messaging) (?:to|with) you|(?:don't|do not) (?:respond|reply|interject)|developer mode|secret test|api|railway|github|code|coding|implement(?:ing|ation)?|bug|bot setup|error logs?)\b/i.test(line))return false;
-  if(!/\b(?:soshiro(?:\s+hoshina)?|hoshina|shiro+|shina+|hoshiyna)\b/i.test(line))return false;
-  if(now-(ambientLast.get(channelId)||0)<120000)return false;
-  return random()<.25;
+function ambientCategory(text,authorId='',referencedAuthorId='',partnerNameMention=false) {
+  const line=String(text||'').replace(/[’‘]/g,"'");
+  if(voiceBoundary(line)||/\b(?:not (?:talking|messaging) (?:to|with) you|(?:don't|do not) (?:respond|reply|interject)|developer mode|secret test|api|railway|github|code|coding|implement(?:ing|ation)?|bug|bot setup|error logs?)\b/i.test(line))return '';
+  // Highest-priority matching subject wins; never stack probabilities.
+  if(/\b(?:soshiro+|hoshina+|shiro+|shina+|hoshiyna|vice[- ]captain)\b/i.test(line))return 'self';
+  const partnerNamed=partnerNameMention||referencedAuthorId===verifiedPartnerId||
+    /\b(?:hinami+|hina+|ynaa*|ynyaa+|sugawara|(?:little |my )?shrimp|(?:his|shiro's|shina's|hoshina's) girlfriend)\b/i.test(line)||
+    new RegExp('<@!?'+verifiedPartnerId+'>').test(line);
+  const partnerSelf=authorId===verifiedPartnerId&&(/\b(?:i(?:'m|'ve|'d|'ll| am| have| had| was| feel| need| want| got| can| can't| don't| did| just| hate| love| miss| wish| think| hope| went| woke| work| hurt| slept)|my\s+[\p{L}]+|me\s+(?:too|today|tonight|again))\b/iu.test(line));
+  if(partnerNamed||partnerSelf)return 'partner';
+  if(/\b(?:exhausted|overwork(?:ed|ing)?|burn(?:ed|t) out|sleep deprived|no sleep|haven't slept|skipp(?:ed|ing) meals?|haven't eaten|injur(?:y|ed|ies)|accident|hurt|bleed(?:ing)?|sick|fever|hospital|emergency|unsafe|danger(?:ous)?|struggl(?:e|ing)|worried|stress(?:ed|ful)?|panic|crying|upset|nightmare|kaiju|defen[cs]e force|mission|deployment|combat|training|swords?|kendo|narumi|mina ash i ro|mina ashiro|hikari|akihiro|peng+goleng*|peng+golen+g*|family|civilians?)\b/i.test(line))return 'concern';
+  return '';
+}
+const ambientRates=Object.freeze({self:.80,partner:.70,concern:.50});
+function ambientEligible(text,channelId,now=Date.now(),random=Math.random,authorId='',referencedAuthorId='',partnerNameMention=false) {
+  if(channelId!==initiativeChannel)return false;
+  const category=ambientCategory(text,authorId,referencedAuthorId,partnerNameMention);
+  if(!category)return false;
+  if(now-(ambientLast.get(channelId)||0)<120000){console.log('[AMBIENT] category='+category+' skipped=cooldown');return false;}
+  const selected=random()<ambientRates[category];
+  console.log('[AMBIENT] category='+category+' chance='+ambientRates[category]+' selected='+selected);
+  return selected;
 }
 function dayHash(value) {
   let hash=2166136261;
@@ -367,7 +383,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=voice-recovery-and-ambient-v38 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=ambient-priority-v39 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -550,7 +566,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
       return {primary:'That particular reaction is unavailable right now.',followup:'',testFailed:true};
     }
   }
-  const ambientRules=context.ambient?'\nYou overheard a public thread message that mentions you, but it is NOT necessarily addressed to you. Join only if you have a natural relevant remark, joke or useful response. Do not assume the speaker is talking to you or demand their attention. If no contribution fits, output exactly [[SKIP]]. No voice, social commands or follow-up.':'';
+  const ambientRules=context.ambient?'\nYou overheard a public thread message about yourself, Hinami, or a topic relevant to your interests or concerns. It is NOT necessarily addressed to you. The app already selected this opportunity; favor joining with a natural relevant remark, joke or useful response. Recognize when someone calls you by name and respond naturally. Do not assume the speaker is talking to you or demand their attention. If no contribution fits, output exactly [[SKIP]]. No voice, social commands or follow-up.':'';
   const audioHistory=[...(context.previous||[]),context.referenced].filter(row=>row?.bot&&row.voiceName).slice(-4);
   const audioRules='\nA previous audio attachment is a real recording already sent, not text to reproduce. Never write an attachment placeholder, voice-history label, simulated recording or stage direction as your chat response. If a recording was not actually sent, do not claim it was.'+(audioHistory.length?' Recent voice attachments exist; the audio transcript may be unavailable.':'');
   const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore})+'\n'+social.rules+initiativeRules+testRules+ambientRules+audioRules+(voiceRequested?'\n'+voiceDirections:'');
@@ -802,7 +818,7 @@ client.on(Events.MessageCreate, async m => {
     const addressed=direct||isReply;
     const testRequest=partnerTurn&&testing.developer&&Boolean(requestKind(raw));
     const secretContinuation=partnerTurn&&testing.secret&&Boolean(requestKind(raw)||/^(?:pretty please|please|gimme|one more|okay then gimme|nevermind|never mind|cancel|stop)[.!?]*$/i.test(raw.trim()));
-    const ambient=!addressed&&!modeCommand&&!exactSecret&&!testRequest&&!secretContinuation&&!testing.developer&&!testing.secret&&ambientEligible(raw,m.channelId);
+    const ambient=!addressed&&!modeCommand&&!exactSecret&&!testRequest&&!secretContinuation&&!testing.developer&&!testing.secret&&ambientEligible(raw,m.channelId,Date.now(),Math.random,m.author.id,referenced?.author?.id||'',Boolean(m.mentions?.users?.has(verifiedPartnerId)));
     if(!addressed&&!modeCommand&&!exactSecret&&!testRequest&&!secretContinuation&&!ambient)return;
     if(modeCommand){
       const command=testingControl(testing,raw,m.author.id);
@@ -817,7 +833,6 @@ client.on(Events.MessageCreate, async m => {
     if (day !== today) { day = today; used = 0; }
     if (used >= dailyLimit) { console.log('[TRIGGER] Skipped: daily request cap'); return; }
     busy = true;
-    if(ambient)ambientLast.set(m.channelId,now);
     used++;
     last.set(m.author.id, now);
     for (const [id, time] of last) if (now - time > cooldown) last.delete(id);
@@ -834,7 +849,7 @@ client.on(Events.MessageCreate, async m => {
         if(partnerTurn&&control.kind)advanceSecret(testing,false,true);
         const eligible=!ambient&&followupEligibleFor(state,revision,m.author.id,current.text)&&!control.kind&&!secretWaiting;
         const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current,forceKind:control.kind,requested:control.requested,secretWaiting,ambient }, m.author.id, m.channelId, m.guild, eligible);
-        if(answer.skip||ambient&&state.revision!==revision)return;
+        if(answer.skip||ambient&&state.revision!==revision){if(ambient)console.log('[AMBIENT] Skipped: '+(answer.skip?'model declined':'new channel activity'));return;}
         if(answer.voice){
           try{
             const file=await synthesizeVoice(answer.voice,m.author.id);
@@ -858,6 +873,7 @@ client.on(Events.MessageCreate, async m => {
           if (i === 0) firstMessage=await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false, ...(answer.actionTarget?{users:[answer.actionTarget]}:{}) } });
           else await m.channel.send({ content: chunk, allowedMentions: { parse: [] } });
         }
+        if(ambient&&firstMessage){ambientLast.set(m.channelId,Date.now());console.log('[AMBIENT] Sent; cooldown started');}
         state.ordinary=Math.min(5,state.ordinary+1);
         if(partnerTurn&&!answer.testFailed)advanceSecret(testing,true,Boolean(control.kind));
         if(answer.actionTarget&&answer.followup){
