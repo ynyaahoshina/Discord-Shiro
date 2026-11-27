@@ -40,7 +40,14 @@ function noteChannelActivity(state) {
     console.log('[FOLLOWUP] Canceled: new channel activity');
   }
 }
-function followupInstruction(eligible) {
+function followupEligibleFor(state,revision,authorId,text,random=Math.random) {
+  if(state.revision!==revision)return false;
+  if(authorId!==verifiedPartnerId)return state.ordinary>=5;
+  if(!String(text||'').trim()||/\b(?:leave me alone|give me (?:some )?space|stop (?:talking|messaging|pinging|flirting|teasing)|(?:don't|do not) (?:reply|message|ping|talk to) me|i need space|i(?:'m| am) driving|i(?:'m| am) riding)\b/i.test(String(text||'').replace(/[’‘]/g,"'")))return false;
+  return random()<0.70;
+}
+function followupInstruction(eligible,partner=false) {
+  if(eligible&&partner)return '\nTwo-message conversational turn selected: send a natural first message, then on a new line the exact marker [[FOLLOWUP]], followed by one short, distinct continuation. Favor a separate thought, joke, clarification or affectionate aside that flows from this specific conversation. Do not repeat the first message, manufacture a question, pressure the recipient, split a sentence artificially, or add filler. If a second message would be inappropriate, omit it. At most one approved media reaction across both messages. Never show the marker.';
   return eligible
     ? '\nOptional double-texting: normally send a single complete reply. Only if an additional, genuinely distinct afterthought, comic beat, affectionate tease or important clarification would benefit from arriving separately, append a new line with the exact marker [[FOLLOWUP]], then one additional short natural chat message. Do not divide a normal answer just for length, repeat yourself, demand attention, or force a follow-up. If there is nothing worth adding, omit the marker entirely. At most one follow-up, with at most one approved media reaction across both messages. Never display the marker to a member.'
     : '';
@@ -50,13 +57,16 @@ function separateFollowup(raw,eligible,truncated=false) {
   return {primary:parts[0]||'',primaryTruncated:truncated&&parts.length===1,
     followup:eligible&&!truncated&&parts.length===2?parts[1]||'':''};
 }
-function scheduleFollowup(state,revision,channel,content,delay=3000+Math.floor(Math.random()*5001)) {
-  if(!content||state.ordinary<5||state.revision!==revision||state.timer!==null)return false;
+function scheduleFollowup(state,revision,channel,content,delay=2000+Math.floor(Math.random()*2001),partner=false,firstMessage=null) {
+  if(!content||(!partner&&state.ordinary<5)||state.revision!==revision||state.timer!==null)return false;
+  // Show Discord's native typing indicator while the second bubble is pending.
+  if(partner)void channel.sendTyping().catch(()=>{});
   state.timer=setTimeout(async()=>{
     state.timer=null;
     if(state.revision!==revision)return;
     try{
-      await channel.send({content,allowedMentions:{parse:[]}});
+      if(partner&&firstMessage)await firstMessage.reply({content,allowedMentions:{parse:[],repliedUser:false}});
+      else await channel.send({content,allowedMentions:{parse:[]}});
       state.ordinary=0;
       console.log('[FOLLOWUP] Sent optional second message');
     }catch(error){console.warn('[FOLLOWUP] Send failed: '+safeError(error.name));}
@@ -245,7 +255,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=verified-partner-identity-v34 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=partner-double-text-v35 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -420,7 +430,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     const remaining=Math.min(requestTimeout,Math.floor((deadline-started)/slotsLeft));
     if(remaining<=0)throw new Error('AI generation deadline exceeded');
     const timeContext='\nCurrent local date and time for your fictional Japan setting: '+japanClock()+'. Use the supplied current Japanese date and time as your own clock whenever asked for the time, or when discussing today, tomorrow, meals, greetings, bedtime, or other time-sensitive topics. Answer in Japan Standard Time by default unless the member explicitly asks for a different timezone; label JST when giving an exact time. Japan is one hour ahead of the Philippines. Let your own local time inform casual conversation naturally, without announcing the clock unnecessarily. Do not assume every member shares your timezone, or invent actual meals, work shifts, location or activities from the clock alone.';
-    const messages = conversation(system+timeContext+followupInstruction(followupEligible), context);
+    const messages = conversation(system+timeContext+followupInstruction(followupEligible,isPartner), context);
     const options = {chat_template_kwargs:{enable_thinking:false}};
     console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     const response = await fetch(endpoint, {
@@ -638,7 +648,10 @@ client.on(Events.MessageCreate, async m => {
       const typing = setInterval(() => m.channel.sendTyping().catch(() => {}), 8000);
       try {
         const history = await readThreadHistory(m);
-        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild, state.ordinary>=5&&state.revision===revision);
+        const current=record(m);
+        const partnerTurn=m.author.id===verifiedPartnerId;
+        const eligible=followupEligibleFor(state,revision,m.author.id,current.text);
+        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current }, m.author.id, m.channelId, m.guild, eligible);
         if(answer.voiceKey){
           if(await sendVoice(m,answer.voiceKey)){state.ordinary=Math.min(5,state.ordinary+1);return;}
           await m.reply({content:({drive:'Take care on your way, alright?',win:'Good luck today. Take care of yourself.',worried:'Try to get a break when you can, alright?',tired:'Get some rest when you can.',trouble:'You really are persistent, huh?',softlove:'Love ya too.'})[answer.voiceKey]||'Heh. Still fond of ya.',allowedMentions:{parse:[],repliedUser:false}});
@@ -654,7 +667,7 @@ client.on(Events.MessageCreate, async m => {
         if(answer.actionTarget&&answer.followup){
           await sendCommandNote(firstMessage,answer.followup);
         }else if(answer.followup){
-          scheduleFollowup(state,revision,m.channel,answer.followup);
+          scheduleFollowup(state,revision,m.channel,answer.followup,partnerTurn?2000+Math.floor(Math.random()*2001):3000+Math.floor(Math.random()*5001),partnerTurn,firstMessage);
         }
       } finally { clearInterval(typing); }
     } catch (error) {
