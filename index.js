@@ -47,8 +47,8 @@ function separateFollowup(raw,eligible,truncated=false) {
   return {primary:parts[0]||'',primaryTruncated:truncated&&parts.length===1,
     followup:eligible&&!truncated&&parts.length===2?parts[1]||'':''};
 }
-function scheduleFollowup(state,revision,channel,content,delay=3000+Math.floor(Math.random()*5001),commandNote=false) {
-  if(!content||(!commandNote&&state.ordinary<5)||state.revision!==revision||state.timer!==null)return false;
+function scheduleFollowup(state,revision,channel,content,delay=3000+Math.floor(Math.random()*5001)) {
+  if(!content||state.ordinary<5||state.revision!==revision||state.timer!==null)return false;
   state.timer=setTimeout(async()=>{
     state.timer=null;
     if(state.revision!==revision)return;
@@ -111,6 +111,19 @@ function resolveSocialAction(raw,options,truncated=false) {
 function rawSocialOutput(raw) {
   return /\[\[ACTION\b|(?:^|\s)-(?:hug|kiss|stab)\s+(?:<@!?|@)/i.test(String(raw||''));
 }
+// Command explanations are delivery acknowledgements, not optional double texts.
+// Reply to the actual command message, even when another member has spoken.
+async function sendCommandNote(sent,content) {
+  if(!sent||!content)return false;
+  try{
+    await sent.reply({content,allowedMentions:{parse:[],repliedUser:false}});
+    console.log('[SOCIAL] Sent separate YAG limitation note');
+    return true;
+  }catch(error){
+    console.warn('[SOCIAL] Command note failed: '+safeError(error.name));
+    return false;
+  }
+}
 function actionNote(action) {
   const lines=[
     "If YAG ignores that, just pretend it worked, yeah?",
@@ -140,7 +153,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=daily-initiative-v28 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=three-initiatives-command-notes-v29 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -384,41 +397,52 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   throw new Error('Empty AI response');
 }
 
-// Once-daily initiative: deterministic pseudo-random Manila time and Discord-backed
+// Three daily initiative windows: deterministic pseudo-random Manila times and Discord-backed
 // duplicate detection, so normal redeployments do not reset the daily schedule.
 const initiativePartner='399942598791266304';
 const initiativeChannel=env.DAILY_INITIATIVE_CHANNEL_ID?.trim()||(channels.size===1?[...channels][0]:'');
 const initiativeWindowMs=15*60*1000;
 const initiativeQuietMs=60*60*1000;
 let initiativeAttemptDay='';
+const initiativeAttemptSlots=new Set();
+// Distinct morning, afternoon and evening bands, with a one-hour buffer.
+const initiativeBands=Object.freeze([[480,780],[780,1080],[1080,1380]]);
 function manilaDate(now=Date.now()) {
   return new Date(now+8*60*60*1000).toISOString().slice(0,10);
 }
-function initiativeSlot(date,channelId,partnerId=initiativePartner) {
-  // A deterministic day-specific hash keeps the random-looking time across restarts.
-  let hash=2166136261;
-  for(const char of date+'|'+channelId+'|'+partnerId)hash=Math.imul(hash^char.charCodeAt(0),16777619);
-  const minutes=8*60+((hash>>>0)%(15*60));
+function initiativeSlots(date,channelId,partnerId=initiativePartner) {
   const midnight=Date.parse(date+'T00:00:00+08:00');
-  return {start:midnight+minutes*60000,end:Math.min(midnight+23*60*60000,midnight+minutes*60000+initiativeWindowMs),minute:minutes,midnight};
+  return initiativeBands.map(([bandStart,bandEnd],index)=>{
+    let hash=2166136261;
+    for(const char of date+'|'+channelId+'|'+partnerId+'|'+index)hash=Math.imul(hash^char.charCodeAt(0),16777619);
+    // Keep the random start within the first four hours of each five-hour band.
+    const minute=bandStart+((hash>>>0)%(bandEnd-bandStart-60));
+    const start=midnight+minute*60000;
+    return {index,start,end:start+initiativeWindowMs,minute,midnight,bandStart:midnight+bandStart*60000,bandEnd:midnight+bandEnd*60000};
+  });
 }
 function isDailyPing(message,botId,partnerId,date) {
   return message.author?.id===botId&&!message.reference?.messageId&&manilaDate(message.createdTimestamp)===date&&
     String(message.content||'').startsWith('<@'+partnerId+'> ');
 }
 async function initiativeHistory(channel,slot,date,botId,partnerId) {
-  let before,previous=[];
-  // Scan to the beginning of today's scheduled window, even in a busy channel.
-  // If the bounded scan cannot establish absence of a previous ping, fail closed.
+  let before,previous=[],count=0,already=false;
+  // Count all of today's daily pings, including ones sent by older deployments.
+  // Scan up to 1,000 messages; if the day cannot be verified, fail closed.
   for(let page=0;page<10;page++){
     const batch=await channel.messages.fetch({limit:100,...(before?{before}:{}),cache:false});
     const entries=[...batch.values()].sort((a,b)=>BigInt(a.id)>BigInt(b.id)?-1:1);
     if(page===0)previous=entries.filter(item=>!item.system&&!item.webhookId&&(!item.author.bot||item.author.id===botId)).reverse().map(record);
-    if(entries.some(m=>isDailyPing(m,botId,partnerId,date)))return {already:true,verified:true,previous};
-    if(entries.length<100||entries.at(-1)?.createdTimestamp<slot.start)return {already:false,verified:true,previous};
+    for(const m of entries){
+      if(!isDailyPing(m,botId,partnerId,date))continue;
+      count++;
+      if(m.createdTimestamp>=slot.bandStart&&m.createdTimestamp<slot.bandEnd)already=true;
+    }
+    if(already||count>=3)return {already:true,verified:true,count,previous};
+    if(entries.length<100||entries.at(-1)?.createdTimestamp<slot.midnight)return {already:false,verified:true,count,previous};
     before=entries.at(-1).id;
   }
-  return {already:false,verified:false,previous};
+  return {already:false,verified:false,count,previous};
 }
 function recentPartnerConversation(previous,partnerId,botId,now) {
   const byId=new Map(previous.map(r=>[r.id,r]));
@@ -432,11 +456,13 @@ function recentPartnerConversation(previous,partnerId,botId,now) {
 }
 async function dailyInitiative() {
   if(!initiativeChannel||!channels.has(initiativeChannel)||!client.isReady())return;
-  const now=Date.now(),today=manilaDate(now),slot=initiativeSlot(today,initiativeChannel);
-  if(now<slot.start||now>=slot.end||initiativeAttemptDay===today||busy)return;
+  const now=Date.now(),today=manilaDate(now);
+  if(initiativeAttemptDay!==today){initiativeAttemptDay=today;initiativeAttemptSlots.clear();}
+  const slot=initiativeSlots(today,initiativeChannel).find(item=>now>=item.start&&now<item.end);
+  if(!slot||initiativeAttemptSlots.has(slot.index)||busy)return;
   if(day!==today){day=today;used=0;}
   if(used>=dailyLimit)return;
-  initiativeAttemptDay=today;
+  initiativeAttemptSlots.add(slot.index);
   busy=true;
   try{
     const profile=await loadPersonality();
@@ -453,11 +479,11 @@ async function dailyInitiative() {
     const answer=await generate({previous:history.previous,current,referenced:null,initiative:true},initiativePartner,initiativeChannel,channel.guild,false);
     if(!answer?.primary||answer.actionTarget||state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
     // Prevent overlap during deployments with a stable daily Discord nonce.
-    const nonce='daily-'+today.replace(/-/g,'')+'-'+String(slot.minute);
+    const nonce='daily-'+today.replace(/-/g,'')+'-'+String(slot.index);
     const body=answer.primary.replace(/<@!?\d+>|<@&\d+>|@everyone|@here/gi,'').trim();
     if(!body)return;
     await channel.send({content:'<@'+initiativePartner+'> '+body,allowedMentions:{parse:[],users:[initiativePartner],repliedUser:false},nonce,enforceNonce:true});
-    console.log('[INITIATIVE] Sent daily partner ping date='+today);
+    console.log('[INITIATIVE] Sent partner ping date='+today+' slot='+slot.index);
   }catch(error){console.warn('[INITIATIVE] Skipped after error: '+safeError(error.name));}
   finally{busy=false;}
 }
@@ -468,7 +494,7 @@ client.once(Events.ClientReady, c => {
   console.log('[MEMORY] New conversation boundary=' + new Date(HISTORY_CUTOFF).toISOString());
   console.log('[AI] Active model=' + model + ' endpoint=' + new URL(endpoint).origin + new URL(endpoint).pathname);
   if(initiativeChannel&&channels.has(initiativeChannel)){
-    console.log('[INITIATIVE] Enabled for existing allowed channel; once per Manila day, 08:00–23:00');
+    console.log('[INITIATIVE] Enabled for existing allowed channel; up to three per Manila day, morning/afternoon/evening');
     setInterval(()=>void dailyInitiative(),30000);
     void dailyInitiative();
   }else console.warn('[INITIATIVE] Disabled: multiple allowed channels or invalid initiative channel; set DAILY_INITIATIVE_CHANNEL_ID to the intended allowed channel');
@@ -508,12 +534,17 @@ client.on(Events.MessageCreate, async m => {
         const history = await readThreadHistory(m);
         const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild, state.ordinary>=5&&state.revision===revision);
         const chunks = splitDiscord(answer.primary);
+        let firstMessage;
         for (const [i, chunk] of chunks.entries()) {
-          if (i === 0) await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false, ...(answer.actionTarget?{users:[answer.actionTarget]}:{}) } });
+          if (i === 0) firstMessage=await m.reply({ content: chunk, allowedMentions: { parse: [], repliedUser: false, ...(answer.actionTarget?{users:[answer.actionTarget]}:{}) } });
           else await m.channel.send({ content: chunk, allowedMentions: { parse: [] } });
         }
         state.ordinary=Math.min(5,state.ordinary+1);
-        if(answer.followup)scheduleFollowup(state,revision,m.channel,answer.followup,undefined,Boolean(answer.actionTarget));
+        if(answer.actionTarget&&answer.followup){
+          await sendCommandNote(firstMessage,answer.followup);
+        }else if(answer.followup){
+          scheduleFollowup(state,revision,m.channel,answer.followup);
+        }
       } finally { clearInterval(typing); }
     } catch (error) {
       console.warn('[AI] Interaction failed: ' + safeError(error.name) + ' ' + (error.message?.startsWith('AI HTTP ') || ['Empty AI response','AI generation timed out','AI generation deadline exceeded'].includes(error.message) ? safeError(error.message) : 'check connectivity or Discord permissions'));
