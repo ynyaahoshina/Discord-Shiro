@@ -42,12 +42,11 @@ function noteChannelActivity(state) {
 }
 function followupEligibleFor(state,revision,authorId,text,random=Math.random) {
   if(state.revision!==revision)return false;
-  if(authorId!==verifiedPartnerId)return state.ordinary>=5;
   if(!String(text||'').trim()||/\b(?:leave me alone|give me (?:some )?space|stop (?:talking|messaging|pinging|flirting|teasing)|(?:don't|do not) (?:reply|message|ping|talk to) me|i need space|i(?:'m| am) driving|i(?:'m| am) riding)\b/i.test(String(text||'').replace(/[’‘]/g,"'")))return false;
-  return random()<0.70;
+  return random()<(authorId===verifiedPartnerId?0.80:0.70);
 }
 function followupInstruction(eligible,partner=false) {
-  if(eligible&&partner)return '\nTwo-message conversational turn selected: send a natural first message, then on a new line the exact marker [[FOLLOWUP]], followed by one short, distinct continuation. Favor a separate thought, joke, clarification or affectionate aside that flows from this specific conversation. Do not repeat the first message, manufacture a question, pressure the recipient, split a sentence artificially, or add filler. If a second message would be inappropriate, omit it. At most one approved media reaction across both messages. Never show the marker.';
+  if(eligible)return '\nTwo-message conversational turn selected: send a natural first message, then on a new line the exact marker [[FOLLOWUP]], followed by one short, distinct continuation. Favor a separate thought, joke, clarification or affectionate aside that flows from this specific conversation. Do not repeat the first message, manufacture a question, pressure the recipient, split a sentence artificially, or add filler. If a second message would be inappropriate, omit it. At most one approved media reaction across both messages. Never show the marker.';
   return eligible
     ? '\nOptional double-texting: normally send a single complete reply. Only if an additional, genuinely distinct afterthought, comic beat, affectionate tease or important clarification would benefit from arriving separately, append a new line with the exact marker [[FOLLOWUP]], then one additional short natural chat message. Do not divide a normal answer just for length, repeat yourself, demand attention, or force a follow-up. If there is nothing worth adding, omit the marker entirely. At most one follow-up, with at most one approved media reaction across both messages. Never display the marker to a member.'
     : '';
@@ -57,10 +56,12 @@ function separateFollowup(raw,eligible,truncated=false) {
   return {primary:parts[0]||'',primaryTruncated:truncated&&parts.length===1,
     followup:eligible&&!truncated&&parts.length===2?parts[1]||'':''};
 }
-function scheduleFollowup(state,revision,channel,content,delay=2000+Math.floor(Math.random()*2001),partner=false,firstMessage=null) {
-  if(!content||(!partner&&state.ordinary<5)||state.revision!==revision||state.timer!==null)return false;
-  // Show Discord's native typing indicator while the second bubble is pending.
-  if(partner)void channel.sendTyping().catch(()=>{});
+const followupDelayMs=4000;
+function scheduleFollowup(state,revision,channel,content,delay=followupDelayMs,partner=false,firstMessage=null) {
+  if(!content||state.revision!==revision||state.timer!==null)return false;
+  const started=Date.now();
+  // Start the full delay only after the first Discord message has been sent.
+  void channel.sendTyping().catch(()=>{});
   state.timer=setTimeout(async()=>{
     state.timer=null;
     if(state.revision!==revision)return;
@@ -68,7 +69,7 @@ function scheduleFollowup(state,revision,channel,content,delay=2000+Math.floor(M
       if(partner&&firstMessage)await firstMessage.reply({content,allowedMentions:{parse:[],repliedUser:false}});
       else await channel.send({content,allowedMentions:{parse:[]}});
       state.ordinary=0;
-      console.log('[FOLLOWUP] Sent optional second message');
+      console.log('[FOLLOWUP] Sent optional second message elapsedMs='+(Date.now()-started));
     }catch(error){console.warn('[FOLLOWUP] Send failed: '+safeError(error.name));}
   },delay);
   console.log('[FOLLOWUP] Scheduled optional second message delayMs='+delay);
@@ -255,7 +256,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=partner-double-text-v35 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=double-text-fixed-delay-v36 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -665,9 +666,13 @@ client.on(Events.MessageCreate, async m => {
         }
         state.ordinary=Math.min(5,state.ordinary+1);
         if(answer.actionTarget&&answer.followup){
+          void m.channel.sendTyping().catch(()=>{});
+          const commandStarted=Date.now();
+          await new Promise(resolve=>setTimeout(resolve,followupDelayMs));
           await sendCommandNote(firstMessage,answer.followup);
+          console.log('[FOLLOWUP] Command note elapsedMs='+(Date.now()-commandStarted));
         }else if(answer.followup){
-          scheduleFollowup(state,revision,m.channel,answer.followup,partnerTurn?2000+Math.floor(Math.random()*2001):3000+Math.floor(Math.random()*5001),partnerTurn,firstMessage);
+          scheduleFollowup(state,revision,m.channel,answer.followup,followupDelayMs,partnerTurn,firstMessage);
         }
       } finally { clearInterval(typing); }
     } catch (error) {
