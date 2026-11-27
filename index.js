@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
-import { readFile } from 'node:fs/promises';
-import { buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput, isEcho } from './dialogue.js';
+import { readFile, readdir } from 'node:fs/promises';
+import { partnerBanter, buildPrompt, conversation, clean, recycled, isFresh, HISTORY_CUTOFF, allowEmotes, renderApprovedEmotes, EMOTE_GUIDE, leakedOutput, wrongPartnerAddress, transcriptOutput, isEcho } from './dialogue.js';
 
 const env = process.env;
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
@@ -134,14 +134,58 @@ function actionNote(action) {
   return lines[n];
 }
 
+
+// Local, allowlisted MP3 assets. Never accept a model-supplied filename or URL.
+const voiceFiles=Object.freeze({
+  fond:'fond, hater love you too.mp3',
+  kiss:'want a kiss.mp3',
+  whisper:'whisper wrong spelling.mp3',
+  hate:'you hate me blabla love you too.mp3',
+  drive:'have a safe drive worried.mp3'
+});
+const voiceFolder=new URL('./voices/',import.meta.url);
+const voiceCooldownMs=3*60*60*1000;
+let lastVoiceAt=0;
+let lastVoiceName='';
+function chooseVoice(context,now=Date.now(),random=Math.random) {
+  if(!context.isPartner||context.initiative||context.current?.authorId!=='399942598791266304')return '';
+  const text=String(context.current?.text||'').replace(/[’‘]/g,"'");
+  const banter=partnerBanter(context,context.previous||[]);
+  if(banter.includes('serious concern')||/\b(?:leave me alone|stop|don't|do not|unsafe|scared|hurt|crying|suicid\w*|self.harm|not joking|i mean it)\b/i.test(text))return '';
+  const rows=(context.previous||[]).filter(r=>r.bot);
+  const prior=rows.filter(r=>r.voiceName);
+  const latest=prior.at(-1);
+  if(now-Math.max(lastVoiceAt,latest?.timestamp||0)<voiceCooldownMs)return '';
+  // Five ordinary replies since any visible media, to keep audio and visual surprises spaced.
+  if(!allowEmotes(context))return '';
+  const driving=/\b(?:(?:i(?:'m| am)|im)\s+(?:about to\s+|gonna\s+|going to\s+)?(?:leave|leaving|head(?:ing)? (?:out|home|to work)|drive|driving|ride|riding)|(?:time to|gotta|need to|about to)\s+(?:leave|drive|ride|head (?:out|home|to work))|(?:paalis|aalis)\s+na\s+(?:ako|ko))\b/i.test(text);
+  if(driving)return random()<0.30?'drive':'';
+  if(!banter.includes('boldly')||random()>=0.40)return '';
+  const names=['fond','kiss','whisper','hate'].filter(name=>name!==(latest?.voiceName||lastVoiceName));
+  return names[Math.floor(random()*names.length)]||'';
+}
+async function sendVoice(message,key) {
+  const filename=voiceFiles[key];
+  if(!filename)return false;
+  try{
+    const data=await readFile(new URL(encodeURIComponent(filename),voiceFolder));
+    if(!data.length||data.length>8*1024*1024)throw new Error('Invalid voice asset size');
+    await message.reply({files:[{attachment:data,name:filename}],allowedMentions:{parse:[],repliedUser:false}});
+    lastVoiceAt=Date.now();lastVoiceName=key;
+    console.log('[VOICE] Sent approved clip '+key);
+    return true;
+  }catch(error){console.warn('[VOICE] Attachment failed: '+safeError(error.name));return false;}
+}
+
 const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
 const record = m => {
   const raw=String(m.content||'');
   const social=parseSocialCommand(raw);
   const mentionedIds=[...raw.matchAll(/<@!?(\d{17,20})>/g)].map(x=>x[1]);
   const text = raw.replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? (social?'@Soshiro Hoshina':'') : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
-  const attachment = m.attachments?.size ? ' [Attachment present; image content unavailable]' : '';
-  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, social, mentionedIds, text: clip(text + attachment) };
+  const voiceName=m.author.id===client.user.id?Object.keys(voiceFiles).find(key=>[...(m.attachments?.values()||[])].some(a=>a.name===voiceFiles[key]))||'':'';
+  const attachment=voiceName?' [Own recorded voice clip: '+voiceName+']':m.attachments?.size?' [Attachment present; content unavailable]':'';
+  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, social, mentionedIds, voiceName, text: clip(text + attachment) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
 const defaultModels = ['nvidia/nemotron-3.5-super-vl-120b-a12b','nvidia/nemotron-3.5-bolt-e4b','nvidia/nemotron-3-ultra-550b-a55b'];
@@ -153,7 +197,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=japan-conversation-clock-v31 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=voice-library-v32 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -312,6 +356,8 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   const isPartner = Boolean(profile.partnerId && authorId === profile.partnerId);
   if(context.initiative&&!isPartner)throw new Error('Daily initiative partner verification failed');
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
+  const voiceKey=chooseVoice({...context,isPartner});
+  if(voiceKey)return {voiceKey,primary:'',followup:''};
   context = {...context, isPartner, emotes: allowEmotes(context) ? await resolveGuildEmotes(guild) : {}};
   context = {...context, previous:(context.previous||[]).filter(row=>!row.bot||!sceneLeak(row.text)), referenced:context.referenced?.bot&&sceneLeak(context.referenced.text)?null:context.referenced};
   console.log('[NOTION] Current author matches partner=' + isPartner);
@@ -537,6 +583,11 @@ client.on(Events.MessageCreate, async m => {
       try {
         const history = await readThreadHistory(m);
         const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current: record(m) }, m.author.id, m.channelId, m.guild, state.ordinary>=5&&state.revision===revision);
+        if(answer.voiceKey){
+          if(await sendVoice(m,answer.voiceKey)){state.ordinary=Math.min(5,state.ordinary+1);return;}
+          await m.reply({content:answer.voiceKey==='drive'?'Take care on your way, alright?':'Heh. Still fond of ya.',allowedMentions:{parse:[],repliedUser:false}});
+          return;
+        }
         const chunks = splitDiscord(answer.primary);
         let firstMessage;
         for (const [i, chunk] of chunks.entries()) {
