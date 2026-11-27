@@ -153,7 +153,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=japan-time-v30 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=japan-conversation-clock-v31 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -324,7 +324,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     const started = Date.now();
     const remaining=Math.min(requestTimeout,Math.floor((deadline-started)/slotsLeft));
     if(remaining<=0)throw new Error('AI generation deadline exceeded');
-    const timeContext='\nCurrent local date and time for your fictional Japan setting: '+japanClock()+'. Use this only when relevant. Your local clock is Japan Standard Time, one hour ahead of the Philippines. Do not assume every member shares your timezone, or invent their location, schedule, or activities from the time alone.';
+    const timeContext='\nCurrent local date and time for your fictional Japan setting: '+japanClock()+'. Use the supplied current Japanese date and time as your own clock whenever asked for the time, or when discussing today, tomorrow, meals, greetings, bedtime, or other time-sensitive topics. Answer in Japan Standard Time by default unless the member explicitly asks for a different timezone; label JST when giving an exact time. Japan is one hour ahead of the Philippines. Let your own local time inform casual conversation naturally, without announcing the clock unnecessarily. Do not assume every member shares your timezone, or invent actual meals, work shifts, location or activities from the clock alone.';
     const messages = conversation(system+timeContext+followupInstruction(followupEligible), context);
     const options = {chat_template_kwargs:{enable_thinking:false}};
     console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
@@ -398,7 +398,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   throw new Error('Empty AI response');
 }
 
-// Three daily initiative windows: deterministic pseudo-random Japan Standard Time (JST) times and Discord-backed
+// Three daily initiative windows: deterministic pseudo-random Philippine time and Discord-backed
 // duplicate detection, so normal redeployments do not reset the daily schedule.
 const initiativePartner='399942598791266304';
 const initiativeChannel=env.DAILY_INITIATIVE_CHANNEL_ID?.trim()||(channels.size===1?[...channels][0]:'');
@@ -408,14 +408,14 @@ let initiativeAttemptDay='';
 const initiativeAttemptSlots=new Set();
 // Distinct morning, afternoon and evening bands, with a one-hour buffer.
 const initiativeBands=Object.freeze([[480,780],[780,1080],[1080,1380]]);
-function japanDate(now=Date.now()) {
-  return new Date(now+9*60*60*1000).toISOString().slice(0,10);
+function manilaDate(now=Date.now()) {
+  return new Date(now+8*60*60*1000).toISOString().slice(0,10);
 }
 function japanClock(now=Date.now()) {
   return new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tokyo',weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(now))+' JST (UTC+09:00)';
 }
 function initiativeSlots(date,channelId,partnerId=initiativePartner) {
-  const midnight=Date.parse(date+'T00:00:00+09:00');
+  const midnight=Date.parse(date+'T00:00:00+08:00');
   return initiativeBands.map(([bandStart,bandEnd],index)=>{
     let hash=2166136261;
     for(const char of date+'|'+channelId+'|'+partnerId+'|'+index)hash=Math.imul(hash^char.charCodeAt(0),16777619);
@@ -426,7 +426,7 @@ function initiativeSlots(date,channelId,partnerId=initiativePartner) {
   });
 }
 function isDailyPing(message,botId,partnerId,date) {
-  return message.author?.id===botId&&!message.reference?.messageId&&japanDate(message.createdTimestamp)===date&&
+  return message.author?.id===botId&&!message.reference?.messageId&&manilaDate(message.createdTimestamp)===date&&
     String(message.content||'').startsWith('<@'+partnerId+'> ');
 }
 async function initiativeHistory(channel,slot,date,botId,partnerId) {
@@ -460,7 +460,7 @@ function recentPartnerConversation(previous,partnerId,botId,now) {
 }
 async function dailyInitiative() {
   if(!initiativeChannel||!channels.has(initiativeChannel)||!client.isReady())return;
-  const now=Date.now(),today=japanDate(now);
+  const now=Date.now(),today=manilaDate(now);
   if(initiativeAttemptDay!==today){initiativeAttemptDay=today;initiativeAttemptSlots.clear();}
   const slot=initiativeSlots(today,initiativeChannel).find(item=>now>=item.start&&now<item.end);
   if(!slot||initiativeAttemptSlots.has(slot.index)||busy)return;
@@ -481,7 +481,7 @@ async function dailyInitiative() {
     used++;
     const current={id:'',authorId:initiativePartner,author:profile.partnerName||'Hinami',timestamp:Date.now(),bot:false,text:'Internal initiative cue: begin a natural conversation with your partner now.'};
     const answer=await generate({previous:history.previous,current,referenced:null,initiative:true},initiativePartner,initiativeChannel,channel.guild,false);
-    if(!answer?.primary||answer.actionTarget||state.revision!==revision||Date.now()>=slot.end||japanDate()!==today)return;
+    if(!answer?.primary||answer.actionTarget||state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
     // Prevent overlap during deployments with a stable daily Discord nonce.
     const nonce='daily-'+today.replace(/-/g,'')+'-'+String(slot.index);
     const body=answer.primary.replace(/<@!?\d+>|<@&\d+>|@everyone|@here/gi,'').trim();
@@ -498,7 +498,7 @@ client.once(Events.ClientReady, c => {
   console.log('[MEMORY] New conversation boundary=' + new Date(HISTORY_CUTOFF).toISOString());
   console.log('[AI] Active model=' + model + ' endpoint=' + new URL(endpoint).origin + new URL(endpoint).pathname);
   if(initiativeChannel&&channels.has(initiativeChannel)){
-    console.log('[INITIATIVE] Enabled for existing allowed channel; up to three per Japan calendar day, morning/afternoon/evening');
+    console.log('[INITIATIVE] Enabled for existing allowed channel; up to three per Philippine calendar day, morning/afternoon/evening');
     setInterval(()=>void dailyInitiative(),30000);
     void dailyInitiative();
   }else console.warn('[INITIATIVE] Disabled: multiple allowed channels or invalid initiative channel; set DAILY_INITIATIVE_CHANNEL_ID to the intended allowed channel');
@@ -524,7 +524,7 @@ client.on(Events.MessageCreate, async m => {
     const now = Date.now();
     if (busy) { console.log('[TRIGGER] Skipped: another request in progress'); return; }
     if (!isReply && now - (last.get(m.author.id) || 0) < cooldown) { console.log('[TRIGGER] Skipped: cooldown'); return; }
-    const today = japanDate();
+    const today = manilaDate();
     if (day !== today) { day = today; used = 0; }
     if (used >= dailyLimit) { console.log('[TRIGGER] Skipped: daily request cap'); return; }
     busy = true;
