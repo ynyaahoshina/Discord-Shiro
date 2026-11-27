@@ -105,6 +105,8 @@ export const EMOTE_GUIDE = Object.freeze({
   HoshinaLaugh: 'Hoshina laughing; something genuinely funny, not every joke.'
 });
 export const GIF_GUIDE = Object.freeze({
+"gif_HinamiNoodles": {"url":"https://cdn.discordapp.com/attachments/1542566379805216769/1568646160774865007/IMG_1948.gif?ex=6b0a4854&is=6b08f6d4&hm=9a1563ff0b5491668f668b448e19507008a0f58ab4c42a425ea419a39bc7402e&","partner":true,"mood":"Hinami aggressively eating noodles with egg while Hoshina looks concerned. Use for relevant food banter, frantic eating or amused concern."},
+"gif_HoshiYnaCarry": {"url":"https://cdn.discordapp.com/attachments/1559416376492433579/1559425625004052491/IMG_1081.png?ex=6b09b289&is=6b086109&hm=dfe6f91d4aae6990277000d497cde1754bfa2fef4ae1a5ae6cf7004af6fd9350&","partner":true,"mood":"Artwork of Hoshina carrying Hinami. A deliberately affectionate surprise during repeated playful mock insults, not genuine conflict."},
 "gif_HinamiDownvote": {"url":"https://media.discordapp.net/attachments/1421035371860594769/1508312866946813972/Untitled_Artwork.gif?ex=6b08fad2&is=6b07a952&hm=303064c5382b5c6409ad454d21d76c9c6a9adb61e2d7425bf92335a21907a0e5&width=640&height=640","partner":false,"mood":"Hinami holding a large down arrow. Playful disapproval, a joking veto, or an unimpressed reaction to a silly opinion. Can be used with server members; not a personal attack."},
 "gif_BrickLove": {"url":"https://media.discordapp.net/attachments/1421035371860594769/1487899595823517798/IMG_5708.gif?ex=6b09343b&is=6b07e2bb&hm=1c256da13b46e30ce6b5b8f807c98f3352d4e3cedc717899ff97a6a77094ccb3","partner":true,"mood":"Fictional slapstick: Hinami throws a brick, Hoshina dodges, then pats her head when she is disappointed it missed. Fondly teasing her exaggerated cartoon antics; only clearly playful exchanges, never actual threats, injuries or arguments."},
 "gif_HikariPenggoleng": {"url":"https://media.discordapp.net/attachments/1542566379805216769/1572387639309504522/Untitled_Artwork.gif?ex=6b09645a&is=6b0812da&hm=78fe1ef99331cada176b49d6568c1bde71635dd5b4cc420595774c96b18be3a9","partner":false,"mood":"Hikari Hoshina, affectionately called Penggoleng, flapping her penguin wings. She is Hoshina and Hinami's daughter in their family continuity. Happy teasing, delight, celebration or proud family amusement. This GIF is also a familiar YumeServer reaction, allowed with other members."},
@@ -200,6 +202,7 @@ export function availableMemories(context) {
 export function availableGifs(context) {
   return Object.fromEntries(Object.entries(GIF_GUIDE).filter(([name,item])=>{
     if(item.partner&&!context.isPartner)return false;
+    if(name==='gif_HoshiYnaCarry'&&!partnerBanter(context,context.previous||[]).includes('boldly'))return false;
     if(name==='gif_HoshiYnaChoke'||name==='gif_BrickLove'){
       const text=String(context.current?.text||'');
       // A slapstick neck-grab must not be selected in a serious or threatening exchange.
@@ -407,7 +410,7 @@ export function transcriptOutput(value,context) {
 }
 // Partner-specific running banter: repeated mock insults can invite a change
 // of tactic, but real conflict or requests for distance always take precedence.
-function partnerBanter(context,rows) {
+export function partnerBanter(context,rows) {
   if(!context.isPartner||context.initiative)return '';
   const current=context.current||{};
   if(!current.authorId)return '';
@@ -430,7 +433,7 @@ function partnerBanter(context,rows) {
     streak++;
   }
   if(streak<2)return '';
-  return 'The verified partner has repeated short mock insults directed at you in this ongoing exchange ('+streak+' turns). This is an established playful dynamic when no serious distress or request for space is present. Rather than repeating exasperation, lectures, challenges or mock threats, change tactics: be boldly, unmistakably flirtatious, confident and amused, as an established fictional boyfriend. A well-timed romantic compliment, cheeky affectionate comeback or charmingly audacious line can turn the teasing around. Prefer actual witty dialogue over simply sending a command or GIF. Match the specific exchange, vary your approach, and do not claim she secretly wants something or dismiss real feelings. Do not push past a genuine refusal; if the tone turns serious, stop flirting.';
+  return 'The verified partner has repeated short mock insults directed at you in this ongoing exchange ('+streak+' turns). This is an established playful dynamic when no serious distress or request for space is present. Rather than repeating exasperation, lectures, challenges or mock threats, change tactics: be boldly, unmistakably flirtatious, confident and amused, as an established fictional boyfriend. A well-timed romantic compliment, cheeky affectionate comeback or charmingly audacious line can turn the teasing around. Use witty dialogue, but occasionally surprise her with the carrying artwork or an affectionate reaction when available. Do not use media every time. Match the specific exchange, vary your approach, and do not claim she secretly wants something or dismiss real feelings. Do not push past a genuine refusal; if the tone turns serious, stop flirting.';
 }
 
 export function conversation(system,context,{retry=false}={}) {
