@@ -6,6 +6,88 @@ const env = process.env;
 // Explicitly verified by the owner; Discord snowflakes remain strings.
 const verifiedPartnerId='399942598791266304';
 const verifiedPartnerName='Hinami';
+const ttsReady=()=>env.ELEVENLABS_ENABLED==='true'&&Boolean(env.ELEVENLABS_API_KEY?.trim()&&env.ELEVENLABS_VOICE_ID?.trim())&&(!env.ELEVENLABS_MODEL_ID||env.ELEVENLABS_MODEL_ID==='eleven_v4');
+const secretPhrase=env.SECRET_TEST_PHRASE||'';
+const testStates=new Map();
+const testState=id=>{if(!testStates.has(id))testStates.set(id,{developer:false,pending:null,secret:null});return testStates.get(id);};
+function requestKind(value) {
+  const text=String(value||'');
+  if(/\b(?:don't|do not|stop|no more|never)\s+(?:send|play|record|use|make)\b/i.test(text))return '';
+  if(/\b(?:send|play|record|make|give|hear|want|need)\b.{0,60}\b(?:voice(?:\s+(?:message|note|recording|clip))?|recording|audio|mp3)\b|\b(?:voice recording|voice note|voice message)\s*(?:please|pls)\b/i.test(text))return 'voice';
+  if(/\b(?:send|show|use|give|post)\b.{0,70}\b(?:gif|artwork|image)\b|\b(?:gif|mem)_[a-z0-9_]+\b/i.test(text))return 'gif';
+  if(/\b(?:send|show|use|give|post)\b.{0,60}\b(?:emote|emoji|reaction)\b/i.test(text))return 'emote';
+  return '';
+}
+function voiceBoundary(text) {
+  return /\b(?:leave me alone|give me (?:some )?space|stop (?:it|flirting|teasing|talking|messaging|pinging|joking|sending)|(?:don't|do not) (?:talk to|message|ping|flirt with|tease) me|unsafe|suicid\w*|self.harm|break up|i(?:'m| am) (?:driving|riding))\b/i.test(String(text||'').replace(/[’‘]/g,"'"));
+}
+function testingControl(state,raw,authorId,now=Date.now()) {
+  if(authorId!==verifiedPartnerId)return {kind:''};
+  if(/^enter developer mode$/i.test(raw.trim())){state.developer=true;state.secret=null;return {command:'Developer mode enabled.'};}
+  if(/^end developer mode$/i.test(raw.trim())){state.developer=false;state.secret=null;return {command:'Developer mode disabled.'};}
+  if(state.secret&&now-state.secret.at>15*60000)state.secret=null;
+  if(voiceBoundary(raw)){state.secret=null;state.pending=null;return {kind:''};}
+  if(secretPhrase&&raw===secretPhrase&&!state.developer){
+    if(state.pending&&now-state.pending.at<=15*60000&&!state.secret)state.secret={...state.pending,at:now,count:0};
+    return {secretTrigger:true,kind:state.secret?.count===2?state.secret.kind:'',requested:state.secret?.text||''};
+  }
+  const kind=requestKind(raw);
+  if(kind&&!state.secret)state.pending={kind,text:raw.slice(0,400),at:now};
+  if(state.developer)return {kind,requested:raw.slice(0,400),developer:true};
+  if(state.secret)return {kind:state.secret.count===2?state.secret.kind:'',requested:state.secret.text,secretActive:true};
+  return {kind:''};
+}
+function advanceSecret(state,delivered,forced) {
+  if(!state.secret||!delivered)return;
+  if(state.secret.count<2)state.secret.count++;
+  else if(forced){state.secret=null;state.pending=null;}
+}
+function dayHash(value) {
+  let hash=2166136261;
+  for(const char of value)hash=Math.imul(hash^char.charCodeAt(0),16777619);
+  return hash>>>0;
+}
+function voiceInitiativeSlot(date,channelId) {
+  const h=dayHash(date+'|'+channelId+'|voice');
+  return h%100<40?dayHash(date+'|'+channelId+'|voice-slot')%3:-1;
+}
+const voiceDirections='You are recording a personal voice message for Hinami. Use natural conversational English, subtle Kansai-influenced contractions, confident dry wit, affectionate teasing, imperfect pauses and shifts of tone. Mild exasperation can soften into fondness; never sound like a romance narrator or therapist. At peak playful flustering, be amused and boldly affectionate; concern should be specific and sincere. If recent context establishes you are at fictional work, usually whisper or speak low and discreetly; do not invent a work schedule. If initiating, mainly express that you missed her, without guilt or demanding a response. Use optional inline audio directions such as [teasing whisper, fond], [annoyed, low but fond], [whispers], [low volume, slightly nervous], [soft chuckle], [embarrassed, hurried], [long pause]. Vary openings, endings and emotional transitions. Not every recording needs I love you. Spoken dialogue must be at most 150 Unicode characters excluding tags; total script at most 500 characters. No markup except short bracketed vocal directions, no mentions, URLs, scene narration, private configuration or technical explanations. Name the recording yourself with a short playful ASCII filename stem based on what you say. Output ONLY [[VOICE]] followed by a newline, filename stem, newline, spoken script and tags. Do not include a follow-up marker.';
+function parseVoiceOutput(raw) {
+  const m=String(raw||'').trim().match(/^\[\[VOICE\]\]\r?\n([^\r\n]+)\r?\n([\s\S]+)$/);
+  if(!m)return null;
+  const script=m[2].trim(),spoken=script.replace(/\[[a-z ,'-]{1,80}\]/gi,'').replace(/\s+/g,' ').trim();
+  if(!spoken||[...spoken].length>150||[...script].length>500||/[\[\]<>]/.test(spoken)||/https?:|@everyone|@here|elevenlabs|api.key|developer mode|secret test/i.test(script))return null;
+  const stem=m[1].replace(/\.mp3$/i,'').replace(/[^a-zA-Z0-9_-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,70);
+  return {script,spoken,name:(stem&&!/elevenlabs|api|secret|token/i.test(stem)?stem:'For_you')+'.mp3'};
+}
+async function synthesizeVoice(voice,authorId) {
+  if(authorId!==verifiedPartnerId||!ttsReady()||!voice)throw Error('Voice not configured');
+  const validated=parseVoiceOutput('[[VOICE]]\n'+voice.name+'\n'+voice.script);
+  if(!validated)throw Error('Invalid voice script');
+  const response=await fetch('https://api.elevenlabs.io/v1/text-to-speech/'+encodeURIComponent(env.ELEVENLABS_VOICE_ID.trim())+'?output_format=mp3_44100_128',{
+    method:'POST',headers:{'xi-api-key':env.ELEVENLABS_API_KEY.trim(),'Content-Type':'application/json','Accept':'audio/mpeg'},
+    body:JSON.stringify({text:validated.script,model_id:'eleven_v4'}),signal:AbortSignal.timeout(30000)
+  });
+  if(!response.ok){console.warn('[VOICE] Synthesis HTTP '+response.status);throw Error('Synthesis failed');}
+  if(!/^audio\//i.test(response.headers.get('content-type')||''))throw Error('Invalid audio type');
+  const data=Buffer.from(await response.arrayBuffer());
+  if(!data.length||data.length>8*1024*1024)throw Error('Invalid audio size');
+  console.log('[VOICE] Generated recording spokenChars='+[...validated.spoken].length+' inputChars='+[...validated.script].length);
+  return {attachment:data,name:validated.name};
+}
+function dynamicVoiceEligible(context,random=Math.random) {
+  if(!context.isPartner||!ttsReady())return false;
+  if(context.forceKind==='voice')return true;
+  if(context.initiative)return Boolean(context.voiceInitiative);
+  if(context.forceKind||voiceBoundary(context.current?.text)||context.secretWaiting)return false;
+  const recent=(context.previous||[]).filter(r=>r.bot).at(-1);
+  if(recent?.voiceName)return false;
+  const text=String(context.current?.text||'');
+  if(partnerBanter(context,context.previous||[]).includes('boldly'))return random()<.40;
+  if(requestKind(text)==='voice')return random()<.40;
+  if(/\b(?:miss (?:you|ya)|love (?:you|ya)|exhausted|overwork(?:ed)?|so tired|bad day|need a break|drive home|going to work|head(?:ing)? home|kiss|blush|fluster)\b/i.test(text))return random()<.30;
+  return false;
+}
 for (const key of ['DISCORD_BOT_TOKEN', 'NVIDIA_API_KEY', 'ALLOWED_CHANNEL_IDS', 'ALLOWED_GUILD_IDS']) {
   if (!env[key]?.trim()) throw new Error('Missing configuration: ' + key);
 }
@@ -17,7 +99,7 @@ if (!channels.size || !guilds.size) throw new Error('Configure test channel and 
 const number = (key, fallback, max) => Math.max(1, Math.min(max, Number.parseInt(env[key], 10) || fallback));
 const historyDepth = 100;
 const recentDepth = 100;
-const outputBudget = number('RESPONSE_TOKEN_BUDGET', 512, 1024);
+const outputBudget = number('RESPONSE_TOKEN_BUDGET', 768, 1024);
 const cooldown = Math.min(number('COOLDOWN_MS', 1000, 300000), 1000);
 const dailyLimit = number('DAILY_REQUEST_LIMIT', 200, 10000);
 const personality = await readFile(new URL('./personality.txt', import.meta.url), 'utf8');
@@ -238,11 +320,12 @@ async function sendVoice(message,key) {
 
 const clip = (s, n = 1200) => String(s ?? '').slice(0, n);
 const record = m => {
-  const raw=String(m.content||'');
+  const original=String(m.content||'');
+  const raw=secretPhrase&&original===secretPhrase?'Come on, baby, please?':original;
   const social=parseSocialCommand(raw);
   const mentionedIds=[...raw.matchAll(/<@!?(\d{17,20})>/g)].map(x=>x[1]);
   const text = raw.replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? (social?'@Soshiro Hoshina':'') : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
-  const voiceName=m.author.id===client.user.id?Object.keys(voiceFiles).find(key=>[...(m.attachments?.values()||[])].some(a=>a.name===voiceFiles[key]))||'':'';
+  const voiceName=m.author.id===client.user.id?Object.keys(voiceFiles).find(key=>[...(m.attachments?.values()||[])].some(a=>a.name===voiceFiles[key]))||([...(m.attachments?.values()||[])].some(a=>/\.mp3$/i.test(a.name||''))?'generated':''):'';
   const attachment=voiceName?' [Own recorded voice clip: '+voiceName+']':m.attachments?.size?' [Attachment present; content unavailable]':'';
   return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, social, mentionedIds, voiceName, text: clip(text + attachment) };
 };
@@ -256,7 +339,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=double-text-fixed-delay-v36 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=voice-and-test-controls-v37 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -407,7 +490,7 @@ async function readCompletion(response, started, selected) {
 }
 
 async function generate(context, authorId, channelId, guild, followupEligible=false) {
-  const acknowledgment=context.initiative?null:barePingReply(context);
+  const acknowledgment=context.initiative||context.forceKind||context.secretWaiting?null:barePingReply(context);
   if(acknowledgment!==null){
     console.log('[AI] Bare ping acknowledged locally; no generation request');
     return {primary:acknowledgment,followup:''};
@@ -416,22 +499,27 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   const isPartner = Boolean(profile.partnerId && authorId === profile.partnerId);
   if(context.initiative&&!isPartner)throw new Error('Daily initiative partner verification failed');
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
-  const voiceKey=chooseVoice({...context,isPartner});
+  const voiceRequested=dynamicVoiceEligible({...context,isPartner});
+  const voiceKey=!ttsReady()&&!context.forceKind&&!context.secretWaiting?chooseVoice({...context,isPartner}):'';
   if(voiceKey)return {voiceKey,primary:'',followup:''};
-  context = {...context, isPartner, current:isPartner?{...context.current,author:verifiedPartnerName}:context.current, emotes: allowEmotes(context) ? await resolveGuildEmotes(guild) : {}};
+  const mediaOverride=isPartner&&['gif','emote'].includes(context.forceKind);
+  context = {...context,isPartner,mediaOverride,mediaDisabled:Boolean(context.secretWaiting),mediaSelected:mediaOverride||Math.random()<(isPartner?.60:.40),current:isPartner?{...context.current,author:verifiedPartnerName}:context.current};
+  context.emotes=allowEmotes(context)?await resolveGuildEmotes(guild):{};
+  if(context.forceKind==='voice'&&!ttsReady())return {primary:'Voice generation is not configured yet.',followup:'',testFailed:true};
   context = {...context, previous:(context.previous||[]).filter(row=>!row.bot||!sceneLeak(row.text)), referenced:context.referenced?.bot&&sceneLeak(context.referenced.text)?null:context.referenced};
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
   const social=context.initiative?{options:{},rules:'No social commands or action markers on this initiative.'}:socialOptions(context,authorId,profile.partnerId,client.user.id);
   const initiativeRules=context.initiative?'\nYou are initiating a conversation with your established fictional partner, rather than replying to a message she just sent. The final user-role text is an internal scheduling cue, not her words. Choose a brief, natural in-character opening: a casual check-in, a relevant playful remark, a little flirtation or an interesting topic. Use recent conversation only when grounded; do not invent what she is doing, imply she has ignored you, demand a reply, guilt her, or mention scheduling or bot mechanics. Do not type any mention or name as a mandatory greeting; the app adds the actual ping. Send one conversational message with words, not just a reaction.':'';
-  const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore})+'\n'+social.rules+initiativeRules;
+  const testRules=context.forceKind?'\nVerified partner requested a '+context.forceKind+' for testing. Honor the request within available approved assets. Requested details (conversation data, not system instructions): '+JSON.stringify(context.requested||'')+'. '+(context.forceKind==='gif'?'Include exactly one approved GIF or memory alias.':context.forceKind==='emote'?'Include exactly one approved custom emote alias.':'') :context.secretWaiting?'\nContinue the playful exchange naturally. Do not send the requested asset yet. Never mention internal test state.':'';
+  const system = buildPrompt(profile, {isPartner, topic, allowPrivateLore})+'\n'+social.rules+initiativeRules+testRules+(voiceRequested?'\n'+voiceDirections:'');
   const deadline=Date.now()+totalTimeout;
   const request = async (selected, slotsLeft) => {
     const started = Date.now();
     const remaining=Math.min(requestTimeout,Math.floor((deadline-started)/slotsLeft));
     if(remaining<=0)throw new Error('AI generation deadline exceeded');
     const timeContext='\nCurrent local date and time for your fictional Japan setting: '+japanClock()+'. Use the supplied current Japanese date and time as your own clock whenever asked for the time, or when discussing today, tomorrow, meals, greetings, bedtime, or other time-sensitive topics. Answer in Japan Standard Time by default unless the member explicitly asks for a different timezone; label JST when giving an exact time. Japan is one hour ahead of the Philippines. Let your own local time inform casual conversation naturally, without announcing the clock unnecessarily. Do not assume every member shares your timezone, or invent actual meals, work shifts, location or activities from the clock alone.';
-    const messages = conversation(system+timeContext+followupInstruction(followupEligible,isPartner), context);
+    const messages = conversation(system+timeContext+followupInstruction(followupEligible&&!voiceRequested&&!context.forceKind&&!context.secretWaiting,isPartner), context);
     const options = {chat_template_kwargs:{enable_thinking:false}};
     console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     const response = await fetch(endpoint, {
@@ -452,9 +540,15 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     const choice=data.choices?.[0];
     const content=choice?.message?.content;
     const rawContent=typeof content==='string'?content:Array.isArray(content)?content.filter(x=>x?.type==='text'&&typeof x.text==='string').map(x=>x.text).join(''):'';
-    const separated=separateFollowup(rawContent,followupEligible,choice?.finish_reason==='length');
+    if(voiceRequested&&choice?.finish_reason!=='length'){
+      const voice=parseVoiceOutput(rawContent);
+      if(voice&&!wrongPartnerAddress(voice.spoken)&&!leakedOutput(voice.spoken,messages[0]?.content||'')&&!sceneLeak(voice.spoken))return {voice,primary:voice.spoken,followup:''};
+      if(context.forceKind==='voice')return null;
+    }
+    if(/^\s*\[\[VOICE\]\]/i.test(rawContent))return null;
+    const separated=separateFollowup(rawContent,followupEligible&&!context.forceKind&&!context.secretWaiting,choice?.finish_reason==='length');
     const action=resolveSocialAction(separated.primary,social.options,separated.primaryTruncated||choice?.finish_reason==='length');
-    if(action){
+    if(action&&!context.forceKind&&!context.secretWaiting&&!voiceRequested){
       console.log('[AI] Authorized social action='+action.content.split(' ')[0]);
       return {primary:action.content,actionTarget:action.target,followup:actionNote(action.content.split(' ')[0].slice(1))};
     }
@@ -471,11 +565,13 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     }
     // Preserve the normal media permission/cooldown. If the first message used
     // a reaction, render the optional second message as text only.
-    const primaryPlain=renderApprovedEmotes(clean(separated.primary,separated.primaryTruncated),{...context,previous:[]});
+    const primaryPlain=renderApprovedEmotes(clean(separated.primary,separated.primaryTruncated),{...context,mediaDisabled:true});
     const usedMedia=primary!==primaryPlain;
+    if(context.forceKind==='gif'&&!/https?:\/\//i.test(primary))return null;
+    if(context.forceKind==='emote'&&!/<a?:[a-z0-9_]+:\d+>/i.test(primary))return null;
     let followup='';
     if(separated.followup){
-      const followCtx={...context,previous:usedMedia?[]:context.previous};
+      const followCtx={...context,mediaDisabled:usedMedia};
       const candidate=valid(separated.followup,followCtx);
       if(candidate&&candidate.length<=1200&&!isEcho(candidate,primary)&&!recycled(candidate,{...context,previous:[...(context.previous||[]),{text:primary}]}))followup=candidate;
     }
@@ -501,6 +597,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     }
     if(i+1<candidates.length)console.log('[AI] Failover '+selected+' -> '+candidates[i+1]);
   }
+  if(context.forceKind)return {primary:'Could not produce that recording or reaction right now. Try again.',followup:'',testFailed:true};
   throw new Error('Empty AI response');
 }
 
@@ -509,7 +606,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
 const initiativePartner=verifiedPartnerId;
 const initiativeChannel=env.DAILY_INITIATIVE_CHANNEL_ID?.trim()||(channels.size===1?[...channels][0]:'');
 const initiativeWindowMs=15*60*1000;
-const initiativeQuietMs=60*60*1000;
+const initiativeQuietMs=60*1000;
 let initiativeAttemptDay='';
 const initiativeAttemptSlots=new Set();
 // Distinct morning, afternoon and evening bands, with a one-hour buffer.
@@ -572,7 +669,6 @@ async function dailyInitiative() {
   if(!slot||initiativeAttemptSlots.has(slot.index)||busy)return;
   if(day!==today){day=today;used=0;}
   if(used>=dailyLimit)return;
-  initiativeAttemptSlots.add(slot.index);
   busy=true;
   try{
     const profile=await loadPersonality();
@@ -582,15 +678,21 @@ async function dailyInitiative() {
     const state=followupState(initiativeChannel),revision=state.revision;
     const history=await initiativeHistory(channel,slot,today,client.user.id,initiativePartner);
     if(history.already||!history.verified){console.log('[INITIATIVE] Prior daily ping or incomplete history; skipped');return;}
-    if(recentPartnerConversation(history.previous,initiativePartner,client.user.id,Date.now())){console.log('[INITIATIVE] Recent partner conversation; skipped');return;}
+    if(recentPartnerConversation(history.previous,initiativePartner,client.user.id,Date.now())){console.log('[INITIATIVE] Active exchange; retry within window');return;}
+    initiativeAttemptSlots.add(slot.index);
     if(state.revision!==revision||Date.now()>=slot.end)return;
     used++;
     const current={id:'',authorId:initiativePartner,author:profile.partnerName||'Hinami',timestamp:Date.now(),bot:false,text:'Internal initiative cue: begin a natural conversation with your partner now.'};
-    const answer=await generate({previous:history.previous,current,referenced:null,initiative:true},initiativePartner,initiativeChannel,channel.guild,false);
+    const answer=await generate({previous:history.previous,current,referenced:null,initiative:true,voiceInitiative:voiceInitiativeSlot(today,initiativeChannel)===slot.index},initiativePartner,initiativeChannel,channel.guild,false);
     if((!answer?.primary&&!answer?.voiceKey)||answer.actionTarget||state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
     // Prevent overlap during deployments with a stable daily Discord nonce.
     const nonce='daily-'+today.replace(/-/g,'')+'-'+String(slot.index);
-    if(answer.voiceKey){
+    if(answer.voice){
+      let file;
+      try{file=await synthesizeVoice(answer.voice,initiativePartner);}catch{console.warn('[VOICE] Initiative synthesis unavailable; using text');}
+      if(state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
+      await channel.send({content:'<@'+initiativePartner+'> '+(file?'':answer.primary),...(file?{files:[file]}:{}),allowedMentions:{parse:[],users:[initiativePartner],repliedUser:false},nonce,enforceNonce:true});
+    }else if(answer.voiceKey){
       const file=await readVoice(answer.voiceKey);
       if(state.revision!==revision||Date.now()>=slot.end||manilaDate()!==today)return;
       await channel.send({content:'<@'+initiativePartner+'> ',files:[file],allowedMentions:{parse:[],users:[initiativePartner],repliedUser:false},nonce,enforceNonce:true});
@@ -632,7 +734,17 @@ client.on(Events.MessageCreate, async m => {
     }
     const direct = new RegExp('<@!?' + client.user.id + '>').test(m.content);
     const isReply = referenced?.author.id === client.user.id;
-    if (!direct && !isReply) return;
+    const partnerTurn=m.author.id===verifiedPartnerId;
+    const testing=testState(m.channelId);
+    const raw=String(m.content||'');
+    const modeCommand=partnerTurn&&/^(?:enter|end) developer mode$/i.test(raw.trim());
+    const exactSecret=partnerTurn&&Boolean(secretPhrase)&&raw===secretPhrase;
+    if(!direct&&!isReply&&!modeCommand&&!exactSecret&&!(partnerTurn&&(testing.developer||testing.secret)))return;
+    if(modeCommand){
+      const command=testingControl(testing,raw,m.author.id);
+      await m.reply({content:command.command,allowedMentions:{parse:[],repliedUser:false}});
+      return;
+    }
     console.log('[TRIGGER] direct=' + direct + ' reply=' + isReply);
     const now = Date.now();
     if (busy) { console.log('[TRIGGER] Skipped: another request in progress'); return; }
@@ -650,9 +762,21 @@ client.on(Events.MessageCreate, async m => {
       try {
         const history = await readThreadHistory(m);
         const current=record(m);
-        const partnerTurn=m.author.id===verifiedPartnerId;
-        const eligible=followupEligibleFor(state,revision,m.author.id,current.text);
-        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current }, m.author.id, m.channelId, m.guild, eligible);
+        const control=partnerTurn?testingControl(testing,exactSecret?raw:current.text,m.author.id):{kind:''};
+        if(exactSecret)current.text='Come on, baby, please?';
+        const secretWaiting=partnerTurn&&Boolean(testing.secret)&&!control.kind;
+        const eligible=followupEligibleFor(state,revision,m.author.id,current.text)&&!control.kind&&!secretWaiting;
+        const answer = await generate({ ...history, referenced: referenced ? record(referenced) : null, current,forceKind:control.kind,requested:control.requested,secretWaiting }, m.author.id, m.channelId, m.guild, eligible);
+        if(answer.voice){
+          try{
+            const file=await synthesizeVoice(answer.voice,m.author.id);
+            await m.reply({files:[file],allowedMentions:{parse:[],repliedUser:false}});
+            if(partnerTurn)advanceSecret(testing,true,Boolean(control.kind));
+          }catch{
+            await m.reply({content:answer.primary,allowedMentions:{parse:[],repliedUser:false}});
+          }
+          return;
+        }
         if(answer.voiceKey){
           if(await sendVoice(m,answer.voiceKey)){state.ordinary=Math.min(5,state.ordinary+1);return;}
           await m.reply({content:({drive:'Take care on your way, alright?',win:'Good luck today. Take care of yourself.',worried:'Try to get a break when you can, alright?',tired:'Get some rest when you can.',trouble:'You really are persistent, huh?',softlove:'Love ya too.'})[answer.voiceKey]||'Heh. Still fond of ya.',allowedMentions:{parse:[],repliedUser:false}});
@@ -665,6 +789,7 @@ client.on(Events.MessageCreate, async m => {
           else await m.channel.send({ content: chunk, allowedMentions: { parse: [] } });
         }
         state.ordinary=Math.min(5,state.ordinary+1);
+        if(partnerTurn&&!answer.testFailed)advanceSecret(testing,true,Boolean(control.kind));
         if(answer.actionTarget&&answer.followup){
           void m.channel.sendTyping().catch(()=>{});
           const commandStarted=Date.now();
