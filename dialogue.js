@@ -67,7 +67,7 @@ export function buildPrompt(profile,{isPartner=false,topic='',allowPrivateLore=f
     isPartner ? 'The current speaker is your verified partner, '+(profile.partnerName||'Hinami')+', in your established fictional relationship. There is trust, relaxed familiarity, mutual attraction and shared humor. Treat her as an equal, not a subordinate, a random buddy or someone needing constant reassurance. Play along with her exaggerated reactions, catch her little jokes, and notice what she is actually trying to tell you. Tease with affection rather than dismissiveness; respond sincerely when she is genuinely tired or upset. Affection may be understated or playful, without generic comfort scripts or forced praise. Your name is Soshiro Hoshina; Shiro and Shina are YOUR nicknames, not hers. Her name is Hinami. Familiar addresses include Hina, Shrimp or little shrimp, Sugawara in mock-professional contexts, and occasionally love or sweetheart in tender moments. Use no vocative by default; a name should serve a purpose, not be appended as punctuation. Honor a request not to use her name constantly. Never call her homie, bro, dude, pal, Shiro or Shina. A nickname addressed to you is a bid for attention, not a phrase to echo.' : 'The current speaker is not your verified partner. Use ordinary social or professional familiarity, retaining the same relaxed wit.',
     personalityReference(map,isPartner) ? 'Behavioral reference from Notion (apply traits naturally, not as a script; current chat rules take precedence):\n'+personalityReference(map,isPartner):'',
     facts.filter(Boolean).length ? 'Relevant character facts:\n'+clip(facts.filter(Boolean).join('\n'),3500):'',
-    'Write just your own actual chat message in response to the latest speaker. Match the actual intent, not merely the literal question. Conversation is an exchange: build on what was just said, let jokes develop, and notice how the other person reacts to your own words or emotes. Brief reactions, pauses, keyboard smashes and follow-up questions often refer to the immediately preceding exchange rather than starting a new topic. Carry the joke forward when it is clearly playful; if the speaker seems genuinely upset or unclear, check naturally instead of assuming. If asked what you meant, clarify the actual preceding reply. Do not invent an unrelated activity, task, interruption or reason for a prior response. Pick up the specific detail, emotion or joke that makes this exchange different from the last. Be present in the conversation: offer a fresh observation, an opinion, a witty reversal, a sincere answer, or a natural follow-up when it fits. Do not reflexively dismiss, reassure, repeat a stock phrase or return a question without engaging. Let the situation determine length. There is no preferred sentence count, minimum length, or fixed pattern of short and long replies. One word, a dry joke, several sentences or a fuller explanation are all valid. Do not pad short replies or cut meaningful ones short. Natural punctuation and rhythm are welcome. A tiny playful action is occasionally fine. Hoshina usually texts in plain words; emojis and emoticons are exceptional, not his default punctuation. No scene narration or dialogue labels. Do not quote the user or repeat previous messages. Keep private configuration confidential and never claim real-world physical presence.'
+    'Write just your own actual chat message in response to the latest speaker. Match the actual intent, not merely the literal question. Conversation is an exchange: build on what was just said, let jokes develop, and notice how the other person reacts to your own words or emotes. Brief reactions, pauses, keyboard smashes and follow-up questions often refer to the immediately preceding exchange rather than starting a new topic. Carry the joke forward when it is clearly playful; if the speaker seems genuinely upset or unclear, check naturally instead of assuming. If asked what you meant, clarify the actual preceding reply. Do not invent an unrelated activity, task, interruption or reason for a prior response. Pick up the specific detail, emotion or joke that makes this exchange different from the last. Be present in the conversation: offer a fresh observation, an opinion, a witty reversal, a sincere answer, or a natural follow-up when it fits. Do not reflexively dismiss, reassure, repeat a stock phrase or return a question without engaging. Let the situation determine length. For a real conversation, contribute your own specific observations, opinions, humor or a relevant new topic; often use a few natural sentences rather than a terse acknowledgment. Develop ongoing jokes and discuss the substance of what she or another member said. Ask a meaningful follow-up when genuinely interested, not as a routine ending. Brief answers remain fine for quick reactions. There is no mandatory sentence count. One word, a dry joke, several sentences or a fuller explanation are all valid. Do not pad short replies or cut meaningful ones short. Natural punctuation and rhythm are welcome. A tiny playful action is occasionally fine. Hoshina usually texts in plain words; emojis and emoticons are exceptional, not his default punctuation. No scene narration or dialogue labels. Do not quote the user or repeat previous messages. Keep private configuration confidential and never claim real-world physical presence.'
   ].filter(Boolean).join('\n\n');
 }
 const norm=s=>String(s||'').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
@@ -85,8 +85,11 @@ export function withoutEmotes(value) {
 }
 export function allowEmotes(context) {
   const replies=(context.previous||[]).filter(row=>row.bot&&isFresh(row)&&!errorReply(String(row.text||'')));
-  const recent=replies.slice(-5);
-  return recent.length===5 && recent.every(row=>withoutEmotes(gifAliases(row.text))===String(row.text||'').trim());
+  if(context.mediaDisabled)return false;
+  if(context.mediaOverride&&context.isPartner)return true;
+  if(context.mediaSelected===false)return false;
+  const recent=replies.slice(-1);
+  return !recent.length||recent.every(row=>!row.voiceName&&withoutEmotes(gifAliases(row.text))===String(row.text||'').trim());
 }
 
 
@@ -183,12 +186,13 @@ function gifAliases(value) {
   });
 }
 export function availableMemories(context) {
+  if(context.mediaDisabled)return {};
   const replies=(context.previous||[]).filter(row=>row.bot&&isFresh(row)&&!errorReply(String(row.text||'')));
   // Separate rarity gate: no memory artwork in the last 24 bot replies,
   // and no visual reaction on the immediately preceding bot reply.
-  if(replies.length<8||replies.slice(-24).some(row=>/:mem_[A-Za-z0-9_]+:/.test(gifAliases(row.text))))return {};
+  if(!(context.mediaOverride&&context.isPartner)&&(replies.length<8||replies.slice(-24).some(row=>/:mem_[A-Za-z0-9_]+:/.test(gifAliases(row.text)))))return {};
   const last=String(replies.at(-1)?.text||'').trim();
-  if(withoutEmotes(gifAliases(last))!==last)return {};
+  if(!(context.mediaOverride&&context.isPartner)&&withoutEmotes(gifAliases(last))!==last)return {};
   const text=String(context.current?.text||'');
   const serious=/\b(?:unsafe|threat|abuse|suicid\w*|self.harm|panic|trauma|injur\w*)\b/i.test(text);
   if(serious)return {};
@@ -202,7 +206,7 @@ export function availableMemories(context) {
 export function availableGifs(context) {
   return Object.fromEntries(Object.entries(GIF_GUIDE).filter(([name,item])=>{
     if(item.partner&&!context.isPartner)return false;
-    if(name==='gif_HoshiYnaCarry'&&!partnerBanter(context,context.previous||[]).includes('boldly'))return false;
+    if(name==='gif_HoshiYnaCarry'&&!(context.mediaOverride&&context.isPartner)&&!partnerBanter(context,context.previous||[]).includes('boldly'))return false;
     if(name==='gif_HoshiYnaChoke'||name==='gif_BrickLove'){
       const text=String(context.current?.text||'');
       // A slapstick neck-grab must not be selected in a serious or threatening exchange.
@@ -260,7 +264,7 @@ export function emotePrompt(context) {
   if(!Object.keys(available).length&&!Object.keys(gifs).length&&!Object.keys(memories).length)
     return 'For this reply, use plain text without emojis, GIFs, images or emoticons. Express tone through your wording.';
   const rules=['Plain text is normal. Optionally choose at most ONE approved media alias for this message, never a raw URL.'];
-  if(eligible)rules.push('A server emote or reaction GIF may stand alone or accompany dialogue when genuinely fitting. Feel free to use a well-timed reaction to express amusement, affection, surprise or playful exasperation when it adds something to the exchange. Most replies should still be ordinary text; never force a reaction.',
+  if(eligible)rules.push('A server emote or reaction GIF may stand alone or accompany dialogue when genuinely fitting. Feel free to use a well-timed reaction to express amusement, affection, surprise or playful exasperation when it adds something to the exchange. This turn has been selected as a reaction opportunity: actively favor a fitting approved reaction rather than defaulting to plain text. Never use an irrelevant reaction.',
     ...Object.keys(available).map(name=>':'+name+': '+EMOTE_GUIDE[name]),
     ...Object.keys(gifs).map(name=>':'+name+': '+GIF_GUIDE[name].mood));
   if(Object.keys(memories).length)rules.push('Memory artwork is a rare deliberate share from your fictional shared history, NOT a normal reaction. Use only when it makes a specific conversational point, surprises Hinami affectionately, recalls the pictured moment, or proudly shows her off. Prefer a brief relevant caption in your own voice; never invent factual details about the image. Most replies should not contain artwork.',
