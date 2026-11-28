@@ -304,15 +304,25 @@ function nimCapacity(lowPriority,now=Date.now(),take=false) {
   if(take)nimAttempts.push(now);
   return true;
 }
+const directQueue=[];
 async function waitForDirectSlot(waitMs=50000) {
   if(!busy&&waitingDirect===0)return true;
-  if(waitingDirect>=5)return false;
-  waitingDirect++;
+  if(directQueue.length>=5)return false;
+  const ticket={};
+  directQueue.push(ticket);
+  waitingDirect=directQueue.length;
   try{
     const until=Date.now()+waitMs;
-    while(busy&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,250));
-    return !busy;
-  }finally{waitingDirect--;}
+    while(Date.now()<until){
+      if(!busy&&directQueue[0]===ticket)return true;
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    return false;
+  }finally{
+    const index=directQueue.indexOf(ticket);
+    if(index>=0)directQueue.splice(index,1);
+    waitingDirect=directQueue.length;
+  }
 }
 const personality = await readFile(new URL('./personality.txt', import.meta.url), 'utf8');
 const client = new Client({
