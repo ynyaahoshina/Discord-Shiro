@@ -87,7 +87,9 @@ function ambientEligible(text,channelId,now=Date.now(),random=Math.random,author
 }
 // Native message reactions are independent of text replies and ambient cooldowns.
 // Local selection avoids a separate NVIDIA request for each observed message.
-const messageReactionRates=Object.freeze({partner:.80,other:.60});
+const messageReactionRates=Object.freeze({partner:.70,other:.50});
+const reactionRecent=new Map();
+const reactionPrivate=new Set(['T_hoshinya','HinamiHeart','HikariHoshinaPenggolenbyMax']);
 function reactionPlan(message,random=Math.random) {
   if(!message||message.author?.bot||message.webhookId||message.system)return null;
   const raw=String(message.content||'');
@@ -97,58 +99,85 @@ function reactionPlan(message,random=Math.random) {
   if((secretPhrase&&raw===secretPhrase)||/^(?:enter|end) developer mode$/i.test(line)||voiceBoundary(line)||
     /\b(?:don't|do not|stop)\s+(?:react(?:ing)?|respond(?:ing)?|reply(?:ing)?)\b|\b(?:not joking|i mean it|genuinely upset|actually angry|you hurt me|bereavement|passed away|suicid\w*|self.harm|abuse|trauma|emergency|accident|injur\w*|bleeding)\b/i.test(line))return null;
   if(random()>=(partner?messageReactionRates.partner:messageReactionRates.other))return null;
-  // Each candidate consists of a permitted custom emote and a Unicode fallback.
-  let choices;
-  if(/\b(?:congratulations|congrats|passed|promoted|achievement|finished|completed|got accepted|i won|we won|happy birthday)\b/i.test(line))
-    choices=[['MaiFlower','🎉'],['','👏']];
-  else if(/\b(?:hikari|peng+golen+g*|peng+goleng*)\b/i.test(line))
-    choices=partner?[['HikariHoshinaPenggolenbyMax','🐧'],['','🐧']]:[['','🐧']];
-  else if(partner&&/\b(?:i (?:really )?love (?:you|ya)|miss (?:you|ya)|kiss(?:es)?|good ?night|sweetheart|love you too)\b/i.test(line))
-    choices=[['T_hoshinya','❤️'],['HinamiHeart','❤️'],['','❤️']];
-  else if(partner&&/^(?:(?:ugh|omg|god)[,!\s]+)?(?:i (?:fucking )?hate (?:you+|u+)|fuck you+|(?:you(?:'re| are)?\s+)?(?:jerk|idiot|asshole|menace))[!.~\s]*$/i.test(line))
-    choices=[['HoshinaLaugh','😏'],['T_hoshinya','❤️'],['','😏']];
-  else if(/\b(?:exhausted|overworked|so tired|no sleep|stressed|worried|sad|upset|rough day|bad day)\b/i.test(line))
-    choices=partner?[['','🫂'],['','❤️']]:[['','🫂'],['','💙']];
-  else if(/\b(?:narumi|germ narumi)\b/i.test(line))
-    choices=[['Germ_narumi','🙄'],['','👀']];
-  else if(/\b(?:what the|no way|holy shit|wtf|omg|excuse me|seriously)\b/i.test(line))
-    choices=[['HinamiShock','😮'],['','👀']];
-  else if(/\b(?:lmao+|lol+|haha(?:ha)*|funny|hilarious)\b/i.test(line)||/😂|🤣/.test(line))
-    choices=[['HoshinaLaugh','😂'],['','😂']];
-  else if(/\b(?:67)\b/.test(line))
-    choices=[['Hinami67','😏'],['Mai67','😏']];
-  else if(/\b(?:eat(?:ing)?|food|dinner|lunch|noodles|ramen|snack)\b/i.test(line))
-    choices=[['IzumiEat','👀'],['','👍']];
-  else if(/\b(?:artwork|drawing|doodle|sketch|illustration|fanart|commission)\b/i.test(line))
-    choices=partner?[['','❤️'],['MaiFlower','👏']]:[['','👏'],['MaiFlower','👍']];
-  else if(/\b(?:thank(?:s| you)|appreciate|good job|well done)\b/i.test(line))
-    choices=[['MaiFlower','👍'],['','👍']];
-  else if(message.attachments?.size||message.stickers?.size)
-    choices=[['','👀']]; // The bot cannot infer the visual contents.
-  else
-    choices=[['','👀'],['','👍']];
-  const [custom,fallback]=choices[Math.min(choices.length-1,Math.floor(random()*choices.length))];
-  return {custom,fallback};
+  let custom=[],fallback=[];
+  if(/\b(?:congratulations|congrats|passed|promoted|achievement|finished|completed|got accepted|i won|we won|happy birthday)\b/i.test(line)){
+    custom=['MaiFlower'];fallback=['🎉','👏'];
+  }else if(/\b(?:hikari|peng+golen+g*|peng+goleng*)\b/i.test(line)){
+    custom=partner?['HikariHoshinaPenggolenbyMax']:[];fallback=['🐧'];
+  }else if(partner&&/\b(?:i (?:really )?love (?:you|ya)|miss (?:you|ya)|kiss(?:es)?|good ?night|sweetheart|love you too)\b/i.test(line)){
+    custom=['T_hoshinya','HinamiHeart'];fallback=['❤️','🥰'];
+  }else if(partner&&/^(?:(?:ugh|omg|god)[,!\s]+)?(?:i (?:fucking )?hate (?:you+|u+)|fuck you+|(?:you(?:'re| are)?\s+)?(?:jerk|idiot|asshole|menace))[!.~\s]*$/i.test(line)){
+    custom=['HoshinaLaugh','T_hoshinya'];fallback=['😏','😂'];
+  }else if(/\b(?:exhausted|overworked|so tired|no sleep|stressed|worried|sad|upset|rough day|bad day)\b/i.test(line)){
+    custom=partner?['HinamiHeart','MaiFlower']:['MaiFlower'];fallback=partner?['🫂','❤️']:['🫂','💙'];
+  }else if(/\b(?:narumi|germ narumi)\b/i.test(line)){
+    custom=['Germ_narumi'];fallback=['🙄','👀'];
+  }else if(/\b(?:what the|no way|holy shit|wtf|omg|excuse me|seriously|crazy|unexpected|surprise[ds]?)\b/i.test(line)){
+    custom=['HinamiShock'];fallback=['😮','😳'];
+  }else if(/\b(?:lmao+|lol+|haha(?:ha)*|funny|hilarious|jok(?:e|ing))\b/i.test(line)||/😂|🤣/.test(line)){
+    custom=['HoshinaLaugh'];fallback=['😂','🤣'];
+  }else if(/\b67\b/.test(line)){
+    custom=['Hinami67','Mai67'];fallback=['😏'];
+  }else if(/\b(?:eat(?:ing)?|food|dinner|lunch|noodles|ramen|snack)\b/i.test(line)){
+    custom=['IzumiEat'];fallback=['🍜','😋'];
+  }else if(/\b(?:artwork|drawing|doodle|sketch|illustration|fanart|commission)\b/i.test(line)){
+    custom=partner?['HinamiHeart','MaiFlower']:['MaiFlower'];fallback=partner?['❤️','👏']:['👏','✨'];
+  }else if(/\b(?:thank(?:s| you)|appreciate|good job|well done|welcome)\b/i.test(line)){
+    custom=['MaiFlower'];fallback=['👍','😊'];
+  }else if(/\b(?:gotta run|running late|rush(?:ing)?|brb|heading out|gotta go)\b/i.test(line)){
+    custom=['Airrun'];fallback=['👋','💨'];
+  }else if(/\b(?:poop|pee(?:ing)?|toilet)\b/i.test(line)){
+    custom=['HinamiPee'];fallback=['😅'];
+  }else if(/\b(?:hmm+|i see|interesting|wonder|watch(?:ing)?|look at)\b/i.test(line)||message.attachments?.size||message.stickers?.size){
+    custom=['IzumiEat'];fallback=['🤔','👀'];
+  }else{
+    // Watching/observing is the only generic custom reaction in the approved library.
+    // Do not assign romantic, shocked or laughing emotes to arbitrary neutral remarks.
+    custom=['IzumiEat'];fallback=['🙂','🤔','👍','👀'];
+  }
+  return {custom,fallback,random};
 }
 async function applyMessageReaction(message,plan) {
   if(!plan||message.channelId!==initiativeChannel||!channels.has(message.channelId)||!guilds.has(message.guildId))return false;
   if(message.author?.bot||message.webhookId||message.system)return false;
-  let emoji=null;
-  // Resolve from the existing guild cache. Never accept arbitrary emoji IDs from users.
-  const privateEmotes=new Set(['T_hoshinya','HinamiHeart','HikariHoshinaPenggolenbyMax']);
-  if(plan.custom&&Object.hasOwn(EMOTE_GUIDE,plan.custom)&&
-      (message.author.id===verifiedPartnerId||!privateEmotes.has(plan.custom))){
+  const partner=message.author.id===verifiedPartnerId;
+  const random=plan.random||Math.random;
+  const names=plan.custom.filter(name=>Object.hasOwn(EMOTE_GUIDE,name)&&(partner||!reactionPrivate.has(name)));
+  const recent=reactionRecent.get(message.channelId)||[];
+  const choose=items=>items[Math.min(items.length-1,Math.floor(random()*items.length))];
+  const fresh=items=>items.filter(item=>!recent.includes(item));
+  const resolve=()=>{
     const me=message.guild?.members?.me;
-    emoji=message.guild?.emojis?.cache?.find(e=>e.name===plan.custom&&e.available!==false&&(!e.roles?.cache?.size||e.roles.cache.some(role=>me?.roles?.cache?.has(role.id))))||null;
+    return names.map(name=>message.guild?.emojis?.cache?.find(e=>e.name===name&&e.available!==false&&(!e.roles?.cache?.size||e.roles.cache.some(role=>me?.roles?.cache?.has(role.id))))).filter(Boolean);
+  };
+  let emojis=resolve();
+  if(names.length&&!emojis.length&&message.guild){
+    // Existing resolver throttles cache refreshes per guild; no extra LLM request.
+    const refreshed=await resolveGuildEmotes(message.guild);
+    emojis=names.flatMap(name=>{
+      const tag=refreshed[name];
+      const id=typeof tag==='string'?tag.match(/^<a?:[A-Za-z0-9_]+:(\d+)>$/)?.[1]:null;
+      return id?[{id,name}]:[];
+    });
   }
+  const freshCustom=emojis.filter(e=>!recent.includes(e.id));
+  const freshFallback=fresh(plan.fallback);
+  // Prefer a suitable custom emoji. Avoid repeating a generic watching reaction
+  // on consecutive messages when a different acknowledgment is available.
+  const onlyGeneric=names.length===1&&names[0]==='IzumiEat';
+  const emoji=choose(freshCustom.length?freshCustom:onlyGeneric&&freshFallback.length?[]:emojis);
+  const fallback=choose(freshFallback.length?freshFallback:plan.fallback);
+  const remember=value=>reactionRecent.set(message.channelId,[...(reactionRecent.get(message.channelId)||[]),value].slice(-2));
   try{
-    await message.react(emoji?.id||plan.fallback);
-    console.log('[REACTION] Sent partner='+(message.author.id===verifiedPartnerId));
+    const selected=emoji?.id||fallback;
+    if(!selected)return false;
+    await message.react(selected);
+    remember(selected);
+    console.log('[REACTION] Sent partner='+partner+' type='+(emoji?'server':'unicode')+(emoji?' name='+emoji.name:''));
     return true;
   }catch(error){
-    // Only retry an unavailable custom emoji, not missing permissions or network failures.
-    if(emoji&&[10014,50035].includes(Number(error.code))){
-      try{await message.react(plan.fallback);console.log('[REACTION] Unicode fallback sent');return true;}
+    if(emoji&&[10014,50035].includes(Number(error.code))&&fallback){
+      try{await message.react(fallback);remember(fallback);console.log('[REACTION] Unicode fallback sent');return true;}
       catch(fallbackError){console.warn('[REACTION] Failed code='+safeError(fallbackError.code||fallbackError.name));return false;}
     }
     console.warn('[REACTION] Failed code='+safeError(error.code||error.name));
@@ -459,7 +488,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=native-message-reactions-v40 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=server-first-reactions-v41 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
