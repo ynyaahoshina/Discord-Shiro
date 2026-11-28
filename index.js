@@ -7,7 +7,12 @@ const env = process.env;
 const verifiedPartnerId='399942598791266304';
 const verifiedPartnerName='Hinami';
 // Stable conversational names are independent of mutable Discord profile names.
-const familiarMemberNames=Object.freeze({'692379268843569185':'Gel'});
+const familiarMemberNames=Object.freeze({
+  '692379268843569185':'Gel',
+  '625861843545751594':'Indie',
+  '764225265298833418':'Max',
+  '304407007769919489':'Carrot'
+});
 function conversationalName(id,fallback='member') {
   return id===verifiedPartnerId?verifiedPartnerName:(Object.hasOwn(familiarMemberNames,id)?familiarMemberNames[id]:String(fallback||'member').slice(0,100));
 }
@@ -567,7 +572,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=familiar-member-names-v44 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=familiar-member-roster-v45 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -787,7 +792,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     if(voiceRequested)messages[0].content+='\nFINAL OUTPUT FORMAT OVERRIDE: Generate an actual audio script, not a Discord chat reply. '+voiceDirections;
     if(context.ambient)messages[0].content+='\n'+ambientRules;
     messages[0].content+=speakerAttributionRules;
-    if(authorId==='692379268843569185')messages[0].content+='\nThe verified current member is Gel. Address her naturally as Gel when a name is needed, not her Discord username or display name. She is a friend, not your romantic partner.';
+    if(Object.hasOwn(familiarMemberNames,authorId))messages[0].content+='\nThe verified current member is '+familiarMemberNames[authorId]+'. Use that familiar name when a name is naturally needed, not their Discord username or display name. They are a familiar server member, not your romantic partner. Existing social action permissions still apply.';
     if(context.initiative){messages[0].content+='\nFINAL INITIATIVE RULE: The recipient is Hinami, but no person just spoke. The final user message is an internal scheduling cue, not chat from her. Do not make historical claims about her actions or words. Ask a neutral question or express your own affection instead.';}
     const options = {chat_template_kwargs:{enable_thinking:false}};
     console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
