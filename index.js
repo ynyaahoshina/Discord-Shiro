@@ -6,6 +6,12 @@ const env = process.env;
 // Explicitly verified by the owner; Discord snowflakes remain strings.
 const verifiedPartnerId='399942598791266304';
 const verifiedPartnerName='Hinami';
+// Stable conversational names are independent of mutable Discord profile names.
+const familiarMemberNames=Object.freeze({'692379268843569185':'Gel'});
+function conversationalName(id,fallback='member') {
+  return id===verifiedPartnerId?verifiedPartnerName:(Object.hasOwn(familiarMemberNames,id)?familiarMemberNames[id]:String(fallback||'member').slice(0,100));
+}
+
 const ttsReady=()=>env.ELEVENLABS_ENABLED==='true'&&Boolean(env.ELEVENLABS_API_KEY?.trim()&&env.ELEVENLABS_VOICE_ID?.trim())&&(!env.ELEVENLABS_MODEL_ID||env.ELEVENLABS_MODEL_ID==='eleven_v4');
 const secretPhrase=env.SECRET_TEST_PHRASE||'';
 const testStates=new Map();
@@ -546,10 +552,10 @@ const record = m => {
   const raw=secretPhrase&&original===secretPhrase?'Come on, baby, please?':original;
   const social=parseSocialCommand(raw);
   const mentionedIds=[...raw.matchAll(/<@!?(\d{17,20})>/g)].map(x=>x[1]);
-  const text = raw.replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? (social?'@Soshiro Hoshina':'') : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
+  const text = raw.replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? (social?'@Soshiro Hoshina':'') : '@' + conversationalName(id,m.mentions.users.get(id)?.username)).trim();
   const voiceName=m.author.id===client.user.id?Object.keys(voiceFiles).find(key=>[...(m.attachments?.values()||[])].some(a=>a.name===voiceFiles[key]))||([...(m.attachments?.values()||[])].some(a=>/\.mp3$/i.test(a.name||''))?'generated':''):'';
   const attachment=voiceName?(voiceTranscripts.get(m.id)||''):m.attachments?.size?' [Attachment present; content unavailable]':'';
-  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: m.author.id===verifiedPartnerId?verifiedPartnerName:clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, social, mentionedIds, voiceName, text: clip((internalVoiceMarker(text)&&m.author.id===client.user.id?'':text)+(attachment?' '+attachment:'')) };
+  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: conversationalName(m.author.id,m.member?.displayName || m.author.username), bot: m.author.id === client.user.id, social, mentionedIds, voiceName, text: clip((internalVoiceMarker(text)&&m.author.id===client.user.id?'':text)+(attachment?' '+attachment:'')) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
 const defaultModels = ['nvidia/nemotron-3.5-super-vl-120b-a12b','nvidia/nemotron-3.5-bolt-e4b','nvidia/nemotron-3-ultra-550b-a55b'];
@@ -561,7 +567,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=verified-speaker-voice-v43 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=familiar-member-names-v44 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -781,6 +787,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     if(voiceRequested)messages[0].content+='\nFINAL OUTPUT FORMAT OVERRIDE: Generate an actual audio script, not a Discord chat reply. '+voiceDirections;
     if(context.ambient)messages[0].content+='\n'+ambientRules;
     messages[0].content+=speakerAttributionRules;
+    if(authorId==='692379268843569185')messages[0].content+='\nThe verified current member is Gel. Address her naturally as Gel when a name is needed, not her Discord username or display name. She is a friend, not your romantic partner.';
     if(context.initiative){messages[0].content+='\nFINAL INITIATIVE RULE: The recipient is Hinami, but no person just spoke. The final user message is an internal scheduling cue, not chat from her. Do not make historical claims about her actions or words. Ask a neutral question or express your own affection instead.';}
     const options = {chat_template_kwargs:{enable_thinking:false}};
     console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
