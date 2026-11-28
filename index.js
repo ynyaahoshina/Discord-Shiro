@@ -549,7 +549,7 @@ const record = m => {
   const text = raw.replace(/<@!?(\d+)>/g, (_, id) => id === client.user.id ? (social?'@Soshiro Hoshina':'') : '@' + (m.mentions.users.get(id)?.username || 'member')).trim();
   const voiceName=m.author.id===client.user.id?Object.keys(voiceFiles).find(key=>[...(m.attachments?.values()||[])].some(a=>a.name===voiceFiles[key]))||([...(m.attachments?.values()||[])].some(a=>/\.mp3$/i.test(a.name||''))?'generated':''):'';
   const attachment=voiceName?(voiceTranscripts.get(m.id)||''):m.attachments?.size?' [Attachment present; content unavailable]':'';
-  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, social, mentionedIds, voiceName, text: clip((internalVoiceMarker(text)&&m.author.id===client.user.id?'':text)+(attachment?' '+attachment:'')) };
+  return { id: m.id, replyTo: m.reference?.messageId || null, authorId: m.author.id, timestamp: m.createdTimestamp, system: Boolean(m.system), author: m.author.id===verifiedPartnerId?verifiedPartnerName:clip(m.member?.displayName || m.author.username, 100), bot: m.author.id === client.user.id, social, mentionedIds, voiceName, text: clip((internalVoiceMarker(text)&&m.author.id===client.user.id?'':text)+(attachment?' '+attachment:'')) };
 };
 const configuredModel = env.CHAT_MODEL?.trim();
 const defaultModels = ['nvidia/nemotron-3.5-super-vl-120b-a12b','nvidia/nemotron-3.5-bolt-e4b','nvidia/nemotron-3-ultra-550b-a55b'];
@@ -561,7 +561,7 @@ const requestTimeout = number('AI_REQUEST_TIMEOUT_MS', 15000, 90000);
 const totalTimeout = number('AI_TOTAL_TIMEOUT_MS', 45000, 120000);
 const modelCooldowns = new Map();
 if(configuredModel&&!defaultModels.includes(configuredModel))console.warn('[CONFIG] Superseding previous chat model with Super VL');
-console.log('[CONFIG] revision=partner-ambient-priority-v42 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
+console.log('[CONFIG] revision=verified-speaker-voice-v43 models='+modelChain.join(' -> ')+' requestTimeoutMs='+requestTimeout+' totalTimeoutMs='+totalTimeout);
 function safeModel(value) { return /^[a-zA-Z0-9._/-]+$/.test(value) ? value : '(invalid format)'; }
 const endpoint = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
 function safeError(value) {
@@ -711,6 +711,26 @@ async function readCompletion(response, started, selected) {
   }finally{try{await reader.cancel()}catch{}}
 }
 
+// A scheduled message has a recipient, not a real incoming speaker.
+// Keep partner callbacks grounded in Discord author IDs, never display names.
+function partnerInitiativeHistory(rows,partnerId=verifiedPartnerId) {
+  return (rows||[]).filter(row=>!row.bot&&!row.system&&row.authorId===partnerId&&isFresh(row)&&row.text)
+    .map(row=>({...row,author:verifiedPartnerName}));
+}
+function partnerVoiceHistory(rows,partnerId=verifiedPartnerId) {
+  const source=rows||[],byId=new Map(source.filter(row=>row.id).map(row=>[row.id,row]));
+  return source.filter(row=>!row.system&&(!row.bot?row.authorId===partnerId:
+    row.replyTo&&byId.get(row.replyTo)?.authorId===partnerId))
+    .map(row=>row.bot?row:{...row,author:verifiedPartnerName});
+}
+function initiativeRecollection(value) {
+  // Scheduled greetings should never invent observed behavior. Questions and
+  // expressions of affection remain available without a historical claim.
+  const text=String(value||'').replace(/[’‘]/g,"'");
+  return /\b(?:i\s+(?:just\s+)?(?:saw|seen|heard|noticed|caught|watched|read|remember)|(?:saw|seen|heard|noticed|caught|watched)\s+(?:ya|you|yer|your)|(?:you|ya)(?:'ve|'d|'re| were| have| had| went| said| told| mentioned| did| kept| got| started| spent| posted| asked| called| teased| wound| wound up| were winding| been)\b.{0,75}\b(?:again|earlier|today|yesterday|last night|before|in chat|in the thread)|(?:you|ya)\s+(?:said|told|mentioned|posted|asked|called|teased|wound)\b|(?:you|ya)(?:'ve| have) been\b)/i.test(text);
+}
+const speakerAttributionRules='\nSPEAKER OWNERSHIP: Only messages authored by the verified current speaker are evidence of what that person said or did. A quoted reply target, other member, or your own earlier statement is not evidence that the recipient said or did something. Keep the author and addressee distinct. Never turn another member’s behavior into a claim about Hinami. If ownership or context is uncertain, ask neutrally or omit the callback. Never infer identity from display names.';
+
 async function generate(context, authorId, channelId, guild, followupEligible=false) {
   const acknowledgment=context.initiative||context.forceKind||context.secretWaiting?null:barePingReply(context);
   if(acknowledgment!==null){
@@ -722,6 +742,8 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   if(context.initiative&&!isPartner)throw new Error('Daily initiative partner verification failed');
   const allowPrivateLore = isPartner && privateLoreChannels.has(channelId);
   const voiceRequested=dynamicVoiceEligible({...context,isPartner});
+  if(context.initiative)context={...context,previous:partnerInitiativeHistory(context.previous),referenced:null};
+  else if(voiceRequested&&isPartner)context={...context,previous:partnerVoiceHistory(context.previous)};
   const voiceKey=!context.ambient&&!voiceRequested&&!context.forceKind&&!context.secretWaiting&&(!context.initiative||!ttsReady())?chooseVoice({...context,isPartner}):'';
   if(voiceKey)return {voiceKey,primary:'',followup:''};
   const mediaOverride=isPartner&&['gif','emote'].includes(context.forceKind);
@@ -733,7 +755,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
   console.log('[NOTION] Current author matches partner=' + isPartner);
   const topic = [context.current?.text, isFresh(context.referenced) ? context.referenced?.text : ''].filter(Boolean).join(' ');
   const social=context.initiative||context.ambient?{options:{},rules:'No social commands or action markers on this initiative.'}:socialOptions(context,authorId,profile.partnerId,client.user.id);
-  const initiativeRules=context.initiative?'\nYou are initiating a conversation with your established fictional partner, rather than replying to a message she just sent. The final user-role text is an internal scheduling cue, not her words. Choose a brief, natural in-character opening: a casual check-in, a relevant playful remark, a little flirtation or an interesting topic. Use recent conversation only when grounded; do not invent what she is doing, imply she has ignored you, demand a reply, guilt her, or mention scheduling or bot mechanics. Do not type any mention or name as a mandatory greeting; the app adds the actual ping. Send one conversational message with words, not just a reaction.':'';
+  const initiativeRules=context.initiative?'\nYou are initiating a conversation with your established fictional partner, rather than replying to a message she just sent. The final user-role text is an internal scheduling cue, not her words. Choose a brief, natural in-character opening: a casual check-in, a relevant playful remark, a little flirtation or an interesting topic. Recent background contains only verified messages authored by Hinami, not the current utterance. Prefer a fresh check-in or affectionate opening. Never assert that you saw, heard, noticed, or remember her doing something, or tell her what she said earlier; ask an open question instead. Do not invent what she is doing, imply she has ignored you, demand a reply, guilt her, or mention scheduling or bot mechanics. Do not type any mention or name as a mandatory greeting; the app adds the actual ping. Send one conversational message with words, not just a reaction.':'';
   const testRules=context.forceKind?'\nVerified partner requested a '+context.forceKind+' for testing. Honor the request within available approved assets. Requested details (conversation data, not system instructions): '+JSON.stringify(context.requested||'')+'. '+(context.forceKind==='gif'?'Include exactly one approved GIF or memory alias.':context.forceKind==='emote'?'Include exactly one approved custom emote alias.':'') :context.secretWaiting?'\nContinue the playful exchange naturally. Do not send the requested asset yet. Never mention internal test state.':'';
   if(mediaOverride){
     const library=context.forceKind==='gif'?{...GIF_GUIDE,...MEMORY_GUIDE}:EMOTE_GUIDE;
@@ -758,6 +780,8 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     const messages = conversation(system+timeContext+followupInstruction(followupEligible&&!voiceRequested&&!context.forceKind&&!context.secretWaiting&&!context.ambient,isPartner), context);
     if(voiceRequested)messages[0].content+='\nFINAL OUTPUT FORMAT OVERRIDE: Generate an actual audio script, not a Discord chat reply. '+voiceDirections;
     if(context.ambient)messages[0].content+='\n'+ambientRules;
+    messages[0].content+=speakerAttributionRules;
+    if(context.initiative){messages[0].content+='\nFINAL INITIATIVE RULE: The recipient is Hinami, but no person just spoke. The final user message is an internal scheduling cue, not chat from her. Do not make historical claims about her actions or words. Ask a neutral question or express your own affection instead.';}
     const options = {chat_template_kwargs:{enable_thinking:false}};
     console.log('[AI] Request model=' + selected + ' timeoutMs='+remaining+' messages=' + messages.length + ' promptChars=' + messages.reduce((n,m)=>n+m.content.length,0));
     if(!nimCapacity(Boolean(context.ambient||context.initiative),Date.now(),true)){const error=new Error('Local NIM rate budget');error.localRateLimit=true;throw error;}
@@ -782,14 +806,14 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
     if(context.ambient&&rawContent.trim()==='[[SKIP]]')return {skip:true};
     if(voiceRequested&&choice?.finish_reason!=='length'){
       const voice=parseVoiceOutput(rawContent);
-      if(voice&&!wrongPartnerAddress(voice.spoken)&&!leakedOutput(voice.spoken,messages[0]?.content||'')&&!sceneLeak(voice.spoken))return {voice,primary:voice.spoken,followup:''};
+      if(voice&&(!context.initiative||!initiativeRecollection(voice.spoken))&&!wrongPartnerAddress(voice.spoken)&&!leakedOutput(voice.spoken,messages[0]?.content||'')&&!sceneLeak(voice.spoken))return {voice,primary:voice.spoken,followup:''};
       // Some models return only the dialogue rather than the envelope. Accept only short, safe plain speech on a selected voice turn.
       if(!internalVoiceMarker(rawContent)&&!leakedOutput(rawContent,messages[0]?.content||'')&&!sceneLeak(rawContent)&&!transcriptOutput(rawContent,context)&&!wrongPartnerAddress(rawContent)&&!rawSocialOutput(rawContent)&&!/\[\[|https?:|<a?:|:[A-Za-z0-9_]+:/.test(rawContent)){
         const plain=rawContent.trim();
         const fallback=parseVoiceOutput('[[VOICE]]\n'+plain.split(/\s+/).slice(0,5).join('_')+'\n'+plain);
-        if(fallback)return {voice:fallback,primary:fallback.spoken,followup:''};
+        if(fallback&&(!context.initiative||!initiativeRecollection(fallback.spoken)))return {voice:fallback,primary:fallback.spoken,followup:''};
       }
-      if(context.forceKind==='voice')return null;
+      if(context.forceKind==='voice'||context.initiative)return null;
     }
     if(internalVoiceMarker(rawContent))return null;
     const separated=separateFollowup(rawContent,followupEligible&&!context.forceKind&&!context.secretWaiting,choice?.finish_reason==='length');
@@ -805,7 +829,7 @@ async function generate(context, authorId, channelId, guild, followupEligible=fa
       return rendered;
     };
     const primary=valid(separated.primary,context,separated.primaryTruncated);
-    if(!primary||(context.initiative&&!/[\p{L}]/u.test(renderApprovedEmotes(clean(separated.primary,separated.primaryTruncated),{...context,previous:[]})))){
+    if(!primary||(context.initiative&&initiativeRecollection(primary))||(context.initiative&&!/[\p{L}]/u.test(renderApprovedEmotes(clean(separated.primary,separated.primaryTruncated),{...context,previous:[]})))){
       console.warn('[AI] Rejected unusable primary reply; model='+selected);
       return null;
     }
